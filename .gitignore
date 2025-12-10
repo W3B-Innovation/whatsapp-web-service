@@ -1,0 +1,21 @@
+# Dependencias
+node_modules
+package-lock.json
+
+# Configuración local / secretos
+.env
+.env.local
+
+# Sesiones y tokens de WhatsApp
+tokens/
+.wwebjs_auth/
+.wwebjs_cache/
+baileys_auth_*/
+*.json.session
+*.data.json
+
+# Logs
+npm-debug.log*
+yarn-error.log*
+logs/
+*.log
