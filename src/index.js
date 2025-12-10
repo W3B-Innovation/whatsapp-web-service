@@ -2,18 +2,18 @@ require('dotenv').config();
 
 const fetch = require('node-fetch');
 const wppconnect = require('@wppconnect-team/wppconnect');
+const express = require('express');
 
 const CRM_SYNC_URL = process.env.CRM_SYNC_URL;
 const CRM_SYNC_TOKEN = process.env.CRM_SYNC_TOKEN;
 const ACCOUNT_LABEL = process.env.ACCOUNT_LABEL || 'colaborador-1';
 // URL opcional para obtener sesiones desde el CRM
-// Ej: https://tu-crm.com/api/whatsapp/web-sync/sessions
+// Ej: http://localhost:3000/api/whatsapp/web-sync/sessions
 const CRM_SESSIONS_URL = process.env.CRM_SESSIONS_URL;
-// Lista de sesiones por defecto desde .env, separadas por coma. Ej: "colab-1,colab-2,colab-3"
-const SESSIONS_ENV = (process.env.SESSIONS || ACCOUNT_LABEL)
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
+// URL para enviar el QR al CRM
+// Ej: http://localhost:3000/api/whatsapp/web-sync/qr
+const CRM_QR_URL = process.env.CRM_QR_URL || (CRM_SYNC_URL ? CRM_SYNC_URL.replace('/web-sync', '/web-sync/qr') : null);
+const PORT = process.env.PORT || 4000;
 
 if (!CRM_SYNC_URL || !CRM_SYNC_TOKEN) {
   console.error(
@@ -21,6 +21,51 @@ if (!CRM_SYNC_URL || !CRM_SYNC_TOKEN) {
   );
   process.exit(1);
 }
+
+// --- Servidor HTTP para comunicación con el CRM ---
+const app = express();
+app.use(express.json());
+
+// Healthcheck simple
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, status: 'whatsapp-web-sync-service running' });
+});
+
+// Endpoint para que el CRM pueda pedir que se inicie una sesión (y se genere el QR)
+// NOTA: El QR sigue mostrándose en los logs del microservicio.
+app.post('/sessions/:sessionId/request-qr', async (req, res) => {
+  const { sessionId } = req.params;
+
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ')
+    ? authHeader.substring('Bearer '.length)
+    : authHeader;
+
+  if (token !== CRM_SYNC_TOKEN) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  if (!sessionId || !sessionId.trim()) {
+    return res.status(400).json({ error: 'sessionId is required' });
+  }
+
+  console.log(
+    `📥 Petición del CRM para iniciar sesión "${sessionId}" y generar QR de vinculación`
+  );
+
+  // Iniciar la sesión (esto disparará catchQR y mostrará el QR en los logs)
+  startSession(sessionId.trim());
+
+  return res.json({
+    ok: true,
+    message:
+      'Sesión iniciada. El QR se generará en el microservicio y debe mostrarse en los logs de consola.',
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`🌐 Servidor HTTP escuchando en el puerto ${PORT}`);
+});
 
 function extractPhoneFromId(id) {
   if (!id) return '';
@@ -55,6 +100,43 @@ async function sendToCrm(payload) {
     }
   } catch (err) {
     console.error('❌ Error de red al llamar al CRM:', err);
+  }
+}
+
+async function sendQrToCrm(sessionId, base64Qr, status) {
+  if (!CRM_QR_URL) {
+    console.warn(`⚠️ [${sessionId}] CRM_QR_URL no configurado, no se puede enviar QR al CRM`);
+    return;
+  }
+
+  try {
+    const res = await fetch(CRM_QR_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${CRM_SYNC_TOKEN}`,
+      },
+      body: JSON.stringify({
+        sessionId,
+        qrBase64: base64Qr,
+        status,
+        timestamp: Date.now(),
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(
+        `❌ [${sessionId}] Error enviando QR al CRM:`,
+        res.status,
+        res.statusText,
+        text
+      );
+    } else {
+      console.log(`✅ [${sessionId}] QR enviado al CRM exitosamente`);
+    }
+  } catch (err) {
+    console.error(`❌ [${sessionId}] Error de red al enviar QR al CRM:`, err);
   }
 }
 
@@ -109,9 +191,17 @@ function startSession(sessionName) {
           `📱 [${sessionName}] Escanea este QR con la app de WhatsApp Business del colaborador (intento ${attempts}):`
         );
         console.log(asciiQR);
+        // Enviar QR al CRM para que se muestre en la UI
+        sendQrToCrm(sessionName, base64Qr, 'waiting_qr');
       },
       statusFind: (statusSession) => {
         console.log(`ℹ️ [${sessionName}] Estado de sesión WPPConnect:`, statusSession);
+        // Enviar actualización de estado al CRM
+        if (statusSession === 'isLogged' || statusSession === 'qrReadSuccess') {
+          sendQrToCrm(sessionName, null, 'connected');
+        } else if (statusSession === 'notLogged' || statusSession === 'disconnectedMobile') {
+          sendQrToCrm(sessionName, null, 'disconnected');
+        }
       },
       logQR: false,
     })
@@ -188,16 +278,17 @@ async function bootstrap() {
   // 1) Intentar cargar sesiones desde el CRM
   let sessions = await loadSessionsFromCrm();
 
-  // 2) Si no hay, usar las definidas en .env
+  // 2) Si no hay sesiones en CRM, no usar fallback de .env: esperar a que el CRM cree sesiones
   if (!sessions || sessions.length === 0) {
-    sessions = SESSIONS_ENV;
     console.log(
-      'ℹ️ No se encontraron sesiones desde CRM, usando sesiones de entorno (.env):',
-      sessions
+      'ℹ️ No se encontraron sesiones habilitadas en CRM. ' +
+        'Crea sesiones en la colección "whatsapp_web_sessions" desde el panel de administración del CRM ' +
+        'y reinicia este microservicio para iniciar el proceso de vinculación (QR).'
     );
-  } else {
-    console.log('✅ Sesiones cargadas desde CRM:', sessions);
+    return;
   }
+
+  console.log('✅ Sesiones cargadas desde CRM:', sessions);
 
   sessions.forEach((s) => startSession(s));
 }
