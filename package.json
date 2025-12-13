@@ -1,12 +1,21 @@
 {
   "name": "whatsapp-web-sync-service",
   "version": "1.0.0",
-  "description": "Microservicio Node.js que usa whatsapp-web.js para sincronizar mensajes con el AI-CRM.",
+  "description": "Microservicio Node.js que sincroniza mensajes de WhatsApp Web con el AI-CRM usando WPPConnect. Permite gestionar múltiples sesiones de WhatsApp para diferentes colaboradores.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js"
   },
+  "keywords": [
+    "whatsapp",
+    "wppconnect",
+    "crm",
+    "sync",
+    "microservice"
+  ],
+  "author": "W3B Innovation",
+  "license": "UNLICENSED",
   "dependencies": {
     "@wppconnect-team/wppconnect": "^1.37.8",
     "dotenv": "^16.4.5",
