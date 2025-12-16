@@ -1021,12 +1021,32 @@ function startSessionInternal(sessionName) {
           }
 
           // Obtener nombre del contacto según documentación
-          const contactName =
-            message.sender?.pushname ||
-            message.sender?.name ||
-            message.chat?.name ||
-            message.notifyName ||
-            contactPhone;
+          // IMPORTANTE:
+          // - Para mensajes salientes (fromMe === true), message.sender suele ser la CUENTA (ej. "Jorge Zanabria")
+          //   y message.chat/name/notifyName suelen corresponder al CONTACTO.
+          // - Para mensajes entrantes, sender suele ser el contacto.
+          // Para evitar que el nombre de la cuenta vinculada aparezca como nombre del contacto en el CRM,
+          // priorizamos distintos campos según la dirección del mensaje.
+          let contactName;
+          if (fromMe) {
+            // Mensaje enviado DESDE la cuenta al contacto:
+            // preferir siempre el nombre del chat/contacto.
+            contactName =
+              message.chat?.name ||
+              message.notifyName ||
+              message.sender?.pushname ||
+              message.sender?.name ||
+              contactPhone;
+          } else {
+            // Mensaje entrante DESDE el contacto hacia la cuenta:
+            // el sender suele ser el contacto, así que lo priorizamos.
+            contactName =
+              message.sender?.pushname ||
+              message.sender?.name ||
+              message.chat?.name ||
+              message.notifyName ||
+              contactPhone;
+          }
 
           // Procesar texto del mensaje
           // WPPConnect puede enviar diferentes tipos de mensajes
