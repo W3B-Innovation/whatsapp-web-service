@@ -37,7 +37,7 @@ if (!CRM_SYNC_URL || !CRM_SYNC_TOKEN) {
 // ============================================================================
 
 // Almacenar clientes activos con información adicional
-const activeClients = new Map(); // sessionId -> { client, accountPhone, connectedAt, state, qrExpiresAt, qrUpdateInterval }
+const activeClients = new Map(); // sessionId -> { client, accountPhone, connectedAt, state, qrExpiresAt, qrUpdateInterval, qrAttempts }
 
 // ============================================================================
 // UTILIDADES
@@ -484,7 +484,7 @@ function cleanupSession(sessionName) {
 
 /**
  * Limpia completamente una sesión: tokens, cliente activo y notifica al CRM
- * Esto se ejecuta cuando el QR expira sin ser escaneado
+ * Esto se ejecuta cuando el QR expira sin ser escaneado o se alcanza el límite de intentos
  */
 async function cleanupSessionCompletely(sessionName, reason = 'QR expired') {
   console.log(`🧹 [${sessionName}] Limpiando sesión completamente (razón: ${reason})`);
@@ -494,6 +494,7 @@ async function cleanupSessionCompletely(sessionName, reason = 'QR expired') {
   if (sessionData && sessionData.client) {
     try {
       await sessionData.client.close();
+      console.log(`✅ [${sessionName}] Cliente cerrado exitosamente`);
     } catch (err) {
       console.error(`❌ [${sessionName}] Error cerrando cliente:`, err.message);
     }
@@ -503,15 +504,23 @@ async function cleanupSessionCompletely(sessionName, reason = 'QR expired') {
   cleanupSession(sessionName);
   
   // 3. Eliminar tokens (esto elimina la carpeta completa de tokens)
-  cleanupSessionTokens(sessionName);
+  // IMPORTANTE: Esto asegura que no queden tokens de sesiones no vinculadas
+  const tokensDeleted = cleanupSessionTokens(sessionName);
+  if (tokensDeleted) {
+    console.log(`✅ [${sessionName}] Tokens eliminados exitosamente de sesión no vinculada`);
+  }
   
-  // 4. Notificar al CRM que el QR expiró para que elimine el registro de Firestore
-  // El CRM eliminará el registro si es una sesión pendiente (isPending: true)
+  // 4. Notificar al CRM según la razón de limpieza
   try {
-    await sendQrToCrm(sessionName, null, 'qr_expired').catch((err) => {
-      console.error(`❌ [${sessionName}] Error notificando expiración al CRM:`, err.message);
+    let statusToSend = 'qr_expired';
+    if (reason.includes('limit')) {
+      statusToSend = 'qr_limit_reached';
+    }
+    
+    await sendQrToCrm(sessionName, null, statusToSend).catch((err) => {
+      console.error(`❌ [${sessionName}] Error notificando al CRM:`, err.message);
     });
-    console.log(`✅ [${sessionName}] Notificación de expiración enviada al CRM`);
+    console.log(`✅ [${sessionName}] Notificación enviada al CRM (status: ${statusToSend})`);
   } catch (err) {
     console.error(`❌ [${sessionName}] Error notificando limpieza al CRM:`, err.message);
   }
@@ -610,8 +619,40 @@ function startSessionInternal(sessionName) {
           });
         }
         
+        // Inicializar contador de intentos QR si no existe
+        if (!sessionData) {
+          console.warn(`⚠️ [${sessionName}] SessionData no encontrado al generar QR (intento ${attempts})`);
+          return;
+        }
+        
+        // Incrementar contador de intentos QR
+        if (!sessionData.qrAttempts) {
+          sessionData.qrAttempts = 0;
+        }
+        sessionData.qrAttempts++;
+        
+        const MAX_QR_ATTEMPTS = 3;
+        
+        // Verificar si se ha excedido el límite de intentos
+        if (sessionData.qrAttempts > MAX_QR_ATTEMPTS) {
+          console.warn(`⚠️ [${sessionName}] Límite de intentos QR alcanzado (${sessionData.qrAttempts}/${MAX_QR_ATTEMPTS}). No se generarán más QRs.`);
+          console.warn(`🗑️ [${sessionName}] Eliminando tokens de sesión no vinculada...`);
+          
+          // Notificar al CRM que se alcanzó el límite
+          sendQrToCrm(sessionName, null, 'qr_limit_reached').catch((err) => {
+            console.error(`❌ [${sessionName}] Error notificando límite de QR al CRM:`, err.message);
+          });
+          
+          // Limpiar sesión completamente (incluye eliminar tokens)
+          cleanupSessionCompletely(sessionName, 'QR limit reached - max attempts exceeded').catch((err) => {
+            console.error(`❌ [${sessionName}] Error limpiando sesión después de límite:`, err.message);
+          });
+          
+          return; // No procesar este QR
+        }
+        
         console.log(
-          `📱 [${sessionName}] QR generado (intento ${attempts}). Escanea con WhatsApp Business:`
+          `📱 [${sessionName}] QR generado (intento ${sessionData.qrAttempts}/${MAX_QR_ATTEMPTS}). Escanea con WhatsApp Business:`
         );
         if (process.env.LOG_QR_ASCII === 'true') {
         console.log(asciiQR);
@@ -693,6 +734,12 @@ function startSessionInternal(sessionName) {
             clearInterval(sessionData.qrUpdateInterval);
             sessionData.qrUpdateInterval = null;
             console.log(`🧹 [${sessionName}] Intervalo de QR limpiado`);
+          }
+          
+          // Resetear contador de intentos QR cuando se conecta exitosamente
+          if (sessionData) {
+            sessionData.qrAttempts = 0;
+            console.log(`🔄 [${sessionName}] Contador de intentos QR reseteado (conexión exitosa)`);
           }
           
           // CRÍTICO: Enviar estado 'connected' al CRM para que actualice isPending: false
@@ -821,6 +868,7 @@ function startSessionInternal(sessionName) {
         qrExpiresAt: null,
         qrUpdateInterval: null,
         isConnected: false, // Flag para indicar si está conectado (evita generar más QRs)
+        qrAttempts: 0, // Contador de intentos QR (se resetea cuando se solicita nuevo QR o se conecta)
       });
       
       // Si hay información de QR pendiente, configurar el intervalo
@@ -890,6 +938,9 @@ function startSessionInternal(sessionName) {
             // Marcar como conectado para evitar generar más QRs
             if (sessionData) {
               sessionData.isConnected = true;
+              // Resetear contador de intentos QR cuando se conecta
+              sessionData.qrAttempts = 0;
+              console.log(`🔄 [${sessionName}] Contador de intentos QR reseteado (estado CONNECTED)`);
             }
             
             // CRÍTICO: Enviar estado 'connected' al CRM para que actualice isPending: false
@@ -960,6 +1011,10 @@ function startSessionInternal(sessionName) {
               clearInterval(sessionData.qrUpdateInterval);
               sessionData.qrUpdateInterval = null;
             }
+            
+            // Resetear contador de intentos QR cuando se conecta
+            sessionData.qrAttempts = 0;
+            console.log(`🔄 [${sessionName}] Contador de intentos QR reseteado (stream CONNECTED)`);
             
             // Enviar estado 'connected' al CRM para actualizar isPending: false
             console.log(`📤 [${sessionName}] onStreamChange CONNECTED: Enviando señal 'connected' al CRM para actualizar isPending: false`);
@@ -1251,6 +1306,14 @@ app.post('/sessions/:sessionId/request-qr', async (req, res) => {
   } else {
     // Limpiar tokens si existen (por si acaso hay tokens de una sesión anterior que expiró)
     cleanupSessionTokens(trimmedSessionId);
+  }
+
+  // Resetear contador de intentos QR cuando se solicita un nuevo QR desde el CRM
+  // Esto permite que el usuario pueda intentar vincular nuevamente después de limpiar
+  const existingSessionData = activeClients.get(trimmedSessionId);
+  if (existingSessionData) {
+    existingSessionData.qrAttempts = 0;
+    console.log(`🔄 [${trimmedSessionId}] Contador de intentos QR reseteado (nueva solicitud desde CRM)`);
   }
 
   // Iniciar la sesión (esto generará el QR)
