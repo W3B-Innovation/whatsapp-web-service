@@ -1,0 +1,24 @@
+{
+  "watch": ["src"],
+  "ignore": [
+    "tokens/**",
+    "tokens/**/*",
+    "tokens",
+    "node_modules/**",
+    "*.log",
+    "*.md",
+    ".env",
+    ".git/**",
+    "package-lock.json",
+    "*.db",
+    "*.db-journal",
+    "*.pma",
+    "*.dat",
+    "*.cache",
+    "*.tmp"
+  ],
+  "ext": "js",
+  "delay": 2000,
+  "ignoreRoot": [".git", "node_modules", "tokens"]
+}
+

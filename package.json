@@ -5,7 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon --watch src --ignore tokens --ignore node_modules --ext js --delay 2000 src/index.js"
   },
   "keywords": [
     "whatsapp",

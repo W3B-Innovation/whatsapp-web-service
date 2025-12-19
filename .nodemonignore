@@ -1,0 +1,17 @@
+tokens/
+node_modules/
+*.log
+*.md
+.env
+.git/
+package-lock.json
+*.db
+*.db-journal
+*.pma
+*.dat
+*.cache
+*.tmp
+*.json
+!nodemon.json
+!package.json
+

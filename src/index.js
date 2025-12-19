@@ -5,6 +5,9 @@ const wppconnect = require('@wppconnect-team/wppconnect');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 
 // ============================================================================
 // CONFIGURACIÓN Y VALIDACIÓN
@@ -453,6 +456,29 @@ function cleanupSessionTokens(sessionName) {
     const tokensPath = path.join(__dirname, '..', 'tokens', sessionName);
     if (fs.existsSync(tokensPath)) {
       console.log(`🗑️ [${sessionName}] Eliminando tokens de sesión...`);
+      
+      // Intentar eliminar todos los archivos y carpetas dentro de tokensPath
+      try {
+        // Primero intentar eliminar archivos individuales si es necesario
+        const files = fs.readdirSync(tokensPath);
+        for (const file of files) {
+          const filePath = path.join(tokensPath, file);
+          try {
+            const stat = fs.statSync(filePath);
+            if (stat.isDirectory()) {
+              fs.rmSync(filePath, { recursive: true, force: true });
+            } else {
+              fs.unlinkSync(filePath);
+            }
+          } catch (fileErr) {
+            console.warn(`⚠️ [${sessionName}] No se pudo eliminar ${file}:`, fileErr.message);
+          }
+        }
+      } catch (readErr) {
+        // Si no se puede leer, intentar eliminar directamente
+      }
+      
+      // Eliminar la carpeta completa
       fs.rmSync(tokensPath, { recursive: true, force: true });
       console.log(`✅ [${sessionName}] Tokens eliminados exitosamente`);
       return true;
@@ -461,6 +487,246 @@ function cleanupSessionTokens(sessionName) {
   } catch (err) {
     console.error(`❌ [${sessionName}] Error eliminando tokens:`, err.message);
     return false;
+  }
+}
+
+/**
+ * Intenta eliminar tokens con reintentos en caso de que estén bloqueados
+ * @param {string} sessionName - Nombre de la sesión
+ * @param {number} maxRetries - Número máximo de reintentos (default: 3)
+ * @param {number} retryDelay - Delay entre reintentos en ms (default: 2000)
+ * @returns {Promise<boolean>} - true si se eliminaron exitosamente, false si falló
+ */
+async function cleanupSessionTokensWithRetry(sessionName, maxRetries = 3, retryDelay = 2000) {
+  const tokensPath = path.join(__dirname, '..', 'tokens', sessionName);
+  
+  if (!fs.existsSync(tokensPath)) {
+    console.log(`ℹ️ [${sessionName}] No hay tokens para eliminar`);
+    return true;
+  }
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`🗑️ [${sessionName}] Eliminando tokens (intento ${attempt}/${maxRetries})...`);
+      fs.rmSync(tokensPath, { recursive: true, force: true });
+      console.log(`✅ [${sessionName}] Tokens eliminados exitosamente`);
+      return true;
+    } catch (err) {
+      if (err.code === 'EBUSY' || err.message?.includes('busy') || err.message?.includes('locked')) {
+        if (attempt < maxRetries) {
+          console.warn(`⚠️ [${sessionName}] Tokens bloqueados, reintentando en ${retryDelay}ms... (intento ${attempt}/${maxRetries})`);
+          // Esperar antes de reintentar
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          // Continuar con el siguiente intento
+          continue;
+        } else {
+          console.error(`❌ [${sessionName}] Error eliminando tokens después de ${maxRetries} intentos:`, err.message);
+          console.warn(`⚠️ [${sessionName}] Los tokens pueden estar bloqueados por un proceso en ejecución. Intenta eliminar manualmente la carpeta: ${tokensPath}`);
+          return false;
+        }
+      } else {
+        console.error(`❌ [${sessionName}] Error eliminando tokens:`, err.message);
+        return false;
+      }
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Verifica si los tokens tienen una cuenta vinculada
+ * Si no tienen cuenta vinculada, los elimina
+ * @param {string} sessionName - Nombre de la sesión
+ * @returns {Promise<boolean>} - true si los tokens fueron eliminados, false si tienen cuenta vinculada o no existen
+ */
+async function verifyAndCleanupTokensIfUnlinked(sessionName) {
+  try {
+    const tokensPath = path.join(__dirname, '..', 'tokens', sessionName);
+    
+    // Si no existen tokens, no hay nada que verificar
+    if (!fs.existsSync(tokensPath)) {
+      console.log(`ℹ️ [${sessionName}] No hay tokens para verificar`);
+      return false;
+    }
+
+    console.log(`🔍 [${sessionName}] Verificando si los tokens tienen cuenta vinculada...`);
+
+    // Intentar crear un cliente temporal para verificar si tiene cuenta vinculada
+    let tempClient = null;
+    let hasLinkedAccount = false;
+    let qrGenerated = false;
+
+    try {
+      // Crear cliente temporal con los tokens existentes
+      // Usar un timeout total de 12 segundos para la verificación
+      const verificationPromise = (async () => {
+        tempClient = await wppconnect.create({
+          session: sessionName,
+          headless: true,
+          devtools: false,
+          useChrome: true,
+          debug: false,
+          logQR: false,
+          browserWS: '',
+          browserArgs: [],
+          puppeteerOptions: {
+            args: [
+              '--no-sandbox',
+              '--disable-setuid-sandbox',
+              '--disable-dev-shm-usage',
+              '--disable-accelerated-2d-canvas',
+              '--no-first-run',
+              '--no-zygote',
+              '--disable-gpu',
+              '--disable-web-security',
+              '--disable-features=IsolateOrigins,site-per-process',
+            ],
+            headless: true,
+            ignoreHTTPSErrors: true,
+          },
+          disableWelcome: true,
+          updatesLog: false,
+          autoClose: 0,
+          tokenStore: 'file',
+          folderNameToken: './tokens',
+          catchQR: () => {
+            // Si se genera un QR, significa que no hay cuenta vinculada
+            qrGenerated = true;
+            console.log(`⚠️ [${sessionName}] QR generado durante verificación - tokens no tienen cuenta vinculada`);
+          },
+        });
+
+        // Esperar un momento para que el cliente se inicialice (tiempo reducido)
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Si se generó un QR, no hay cuenta vinculada
+        if (qrGenerated) {
+          return false;
+        }
+
+        // Verificar si el cliente está conectado
+        const isConnected = await isClientConnected(tempClient);
+        
+        if (isConnected) {
+          // Intentar obtener información de la cuenta con timeout
+          try {
+            const hostDevicePromise = tempClient.getHostDevice();
+            const timeoutPromise = new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Timeout obteniendo información de cuenta')), 5000)
+            );
+            
+            const hostDevice = await Promise.race([hostDevicePromise, timeoutPromise]);
+            const accountPhone = hostDevice?.wid?.user || hostDevice?.wid || null;
+            
+            if (accountPhone) {
+              console.log(`✅ [${sessionName}] Tokens tienen cuenta vinculada: ${accountPhone}`);
+              return true;
+            } else {
+              // Intentar otra forma de obtener el número
+              try {
+                const numberIdPromise = tempClient.getNumberId();
+                const numberIdTimeout = new Promise((_, reject) => 
+                  setTimeout(() => reject(new Error('Timeout')), 3000)
+                );
+                const numberId = await Promise.race([numberIdPromise, numberIdTimeout]);
+                
+                if (numberId) {
+                  const phone = extractPhoneFromId(numberId);
+                  console.log(`✅ [${sessionName}] Tokens tienen cuenta vinculada: ${phone}`);
+                  return true;
+                }
+              } catch (err) {
+                // Continuar sin número
+              }
+            }
+            
+            // Si llegamos aquí y no tenemos cuenta, pero está conectado, asumir que tiene cuenta
+            // (puede ser que no se pudo obtener el número pero está conectado)
+            console.log(`✅ [${sessionName}] Cliente conectado, tokens tienen cuenta vinculada`);
+            return true;
+          } catch (err) {
+            console.log(`⚠️ [${sessionName}] Error obteniendo información de cuenta:`, err.message);
+            // Si está conectado pero no se pudo obtener el número, asumir que tiene cuenta
+            return true;
+          }
+        } else {
+          console.log(`⚠️ [${sessionName}] Cliente no está conectado, tokens no tienen cuenta vinculada`);
+          return false;
+        }
+      })();
+
+      // Timeout total de 12 segundos para la verificación
+      const timeoutPromise = new Promise((resolve) => {
+        setTimeout(() => {
+          console.log(`⏱️ [${sessionName}] Timeout en verificación de tokens, asumiendo que no tienen cuenta vinculada`);
+          resolve(false);
+        }, 12000);
+      });
+
+      hasLinkedAccount = await Promise.race([verificationPromise, timeoutPromise]);
+
+      // Cerrar el cliente temporal completamente
+      if (tempClient) {
+        try {
+          console.log(`🔒 [${sessionName}] Cerrando cliente temporal...`);
+          await Promise.race([
+            tempClient.close(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout cerrando cliente')), 8000))
+          ]);
+          console.log(`✅ [${sessionName}] Cliente temporal cerrado`);
+          
+          // Esperar un momento adicional para asegurar que el navegador se haya cerrado completamente
+          // Esto es importante porque Puppeteer puede mantener procesos en segundo plano
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          console.log(`⏳ [${sessionName}] Esperando que el navegador se cierre completamente...`);
+        } catch (closeErr) {
+          console.warn(`⚠️ [${sessionName}] Error cerrando cliente temporal:`, closeErr.message);
+          // Esperar de todas formas antes de continuar
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+
+    } catch (err) {
+      console.log(`⚠️ [${sessionName}] Error verificando tokens (probablemente no tienen cuenta vinculada):`, err.message);
+      // Si hay error al crear el cliente, probablemente los tokens no son válidos
+      hasLinkedAccount = false;
+      
+      // Asegurarse de cerrar el cliente si se creó parcialmente
+      if (tempClient) {
+        try {
+          await Promise.race([
+            tempClient.close(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+          ]);
+          // Esperar que el navegador se cierre
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        } catch (closeErr) {
+          // Ignorar errores al cerrar, pero esperar de todas formas
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+    }
+
+    // Si no tiene cuenta vinculada, eliminar los tokens
+    // Esperar un poco más antes de eliminar para asegurar que el navegador se haya cerrado
+    if (!hasLinkedAccount) {
+      console.log(`🗑️ [${sessionName}] Tokens no tienen cuenta vinculada, eliminando...`);
+      // Esperar un momento adicional antes de intentar eliminar
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      await cleanupSessionTokensWithRetry(sessionName);
+      return true; // Tokens eliminados
+    }
+
+    return false; // Tokens tienen cuenta vinculada, no se eliminaron
+  } catch (err) {
+    console.error(`❌ [${sessionName}] Error verificando tokens:`, err.message);
+    // En caso de error, eliminar los tokens por seguridad
+    console.log(`🗑️ [${sessionName}] Eliminando tokens debido a error en verificación...`);
+    // Esperar un momento antes de intentar eliminar
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    await cleanupSessionTokensWithRetry(sessionName);
+    return true;
   }
 }
 
@@ -486,6 +752,54 @@ function cleanupSession(sessionName) {
  * Limpia completamente una sesión: tokens, cliente activo y notifica al CRM
  * Esto se ejecuta cuando el QR expira sin ser escaneado o se alcanza el límite de intentos
  */
+/**
+ * Fuerza el cierre de procesos de Chrome/Chromium relacionados con la sesión
+ * @param {string} sessionName - Nombre de la sesión
+ */
+async function killBrowserProcesses(sessionName) {
+  try {
+    const tokensPath = path.join(__dirname, '..', 'tokens', sessionName);
+    const normalizedPath = tokensPath.replace(/\\/g, '/');
+    
+    if (process.platform === 'win32') {
+      // Windows: buscar procesos de Chrome que usen la carpeta de tokens
+      try {
+        // Buscar procesos de Chrome/Chromium que puedan estar usando la carpeta
+        const { stdout } = await execAsync(
+          `tasklist /FI "IMAGENAME eq chrome.exe" /FI "IMAGENAME eq chromium.exe" /FO CSV 2>nul || echo ""`
+        );
+        
+        if (stdout && stdout.includes('chrome.exe')) {
+          console.log(`🔪 [${sessionName}] Intentando cerrar procesos de Chrome...`);
+          // Intentar cerrar procesos de Chrome de forma más suave primero
+          try {
+            await execAsync(`taskkill /F /IM chrome.exe /T 2>nul || echo ""`);
+            await execAsync(`taskkill /F /IM chromium.exe /T 2>nul || echo ""`);
+            console.log(`✅ [${sessionName}] Procesos de Chrome cerrados`);
+          } catch (killErr) {
+            // Ignorar errores si no hay procesos
+          }
+        }
+      } catch (err) {
+        // Ignorar errores en la búsqueda de procesos
+      }
+    } else {
+      // Linux/Mac: usar pkill o killall
+      try {
+        await execAsync(`pkill -f "chrome.*${sessionName}" || true`);
+        await execAsync(`pkill -f "chromium.*${sessionName}" || true`);
+      } catch (err) {
+        // Ignorar errores
+      }
+    }
+    
+    // Esperar un momento para que los procesos se cierren
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  } catch (err) {
+    console.warn(`⚠️ [${sessionName}] Error cerrando procesos del navegador:`, err.message);
+  }
+}
+
 async function cleanupSessionCompletely(sessionName, reason = 'QR expired') {
   console.log(`🧹 [${sessionName}] Limpiando sesión completamente (razón: ${reason})`);
   
@@ -493,28 +807,45 @@ async function cleanupSessionCompletely(sessionName, reason = 'QR expired') {
   const sessionData = activeClients.get(sessionName);
   if (sessionData && sessionData.client) {
     try {
-      await sessionData.client.close();
+      console.log(`🔒 [${sessionName}] Cerrando cliente...`);
+      await Promise.race([
+        sessionData.client.close(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
+      ]);
       console.log(`✅ [${sessionName}] Cliente cerrado exitosamente`);
     } catch (err) {
       console.error(`❌ [${sessionName}] Error cerrando cliente:`, err.message);
     }
   }
   
+  // 1.5. Forzar cierre de procesos del navegador
+  await killBrowserProcesses(sessionName);
+  
   // 2. Limpiar del mapa de clientes activos
   cleanupSession(sessionName);
   
-  // 3. Eliminar tokens (esto elimina la carpeta completa de tokens)
+  // 3. Esperar un momento antes de eliminar tokens
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  
+  // 4. Eliminar tokens (esto elimina la carpeta completa de tokens)
   // IMPORTANTE: Esto asegura que no queden tokens de sesiones no vinculadas
-  const tokensDeleted = cleanupSessionTokens(sessionName);
+  const tokensDeleted = await cleanupSessionTokensWithRetry(sessionName, 5, 2000);
   if (tokensDeleted) {
     console.log(`✅ [${sessionName}] Tokens eliminados exitosamente de sesión no vinculada`);
+  } else {
+    console.warn(`⚠️ [${sessionName}] No se pudieron eliminar todos los tokens, pero la sesión fue limpiada`);
   }
   
-  // 4. Notificar al CRM según la razón de limpieza
+  // 5. Esperar un momento adicional para asegurar que todo se haya cerrado
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  
+  // 6. Notificar al CRM según la razón de limpieza
   try {
     let statusToSend = 'qr_expired';
     if (reason.includes('limit')) {
       statusToSend = 'qr_limit_reached';
+    } else if (reason.includes('Manual')) {
+      statusToSend = 'cleaned';
     }
     
     await sendQrToCrm(sessionName, null, statusToSend).catch((err) => {
@@ -572,6 +903,30 @@ function startSession(sessionName) {
 function startSessionInternal(sessionName) {
   console.log(`🚀 [${sessionName}] Iniciando sesión WPPConnect...`);
 
+  // CRÍTICO: Crear entrada en activeClients ANTES de iniciar la sesión
+  // Esto asegura que cuando se genere el QR, sessionData ya exista
+  if (!activeClients.has(sessionName)) {
+    activeClients.set(sessionName, {
+      client: null, // Se asignará cuando el cliente esté listo
+      accountPhone: null,
+      connectedAt: null,
+      state: 'INITIALIZING',
+      qrExpiresAt: null,
+      qrUpdateInterval: null,
+      isConnected: false,
+      qrAttempts: 0, // Inicializar contador de intentos QR
+    });
+    console.log(`📝 [${sessionName}] Entrada creada en activeClients antes de iniciar sesión`);
+    console.log(`🔍 [${sessionName}] Verificación: activeClients.has('${sessionName}') = ${activeClients.has(sessionName)}`);
+  } else {
+    // Si ya existe, resetear contador de intentos QR para nuevo intento
+    const existingData = activeClients.get(sessionName);
+    if (existingData) {
+      existingData.qrAttempts = 0;
+      console.log(`🔄 [${sessionName}] Contador de intentos QR reseteado (nueva sesión)`);
+    }
+  }
+
   wppconnect
     .create({
       session: sessionName,
@@ -605,8 +960,14 @@ function startSessionInternal(sessionName) {
       folderNameToken: './tokens', // Carpeta para tokens
       // Callback para QR según documentación
       catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
+        console.log(`🔍 [${sessionName}] catchQR llamado - intento ${attempts}, sessionName: "${sessionName}"`);
+        console.log(`🔍 [${sessionName}] activeClients tiene ${activeClients.size} sesiones`);
+        console.log(`🔍 [${sessionName}] Sesiones en activeClients: ${Array.from(activeClients.keys()).join(', ')}`);
+        
         // CRÍTICO: Verificar si la sesión ya está conectada antes de generar QR
         const sessionData = activeClients.get(sessionName);
+        console.log(`🔍 [${sessionName}] sessionData obtenido: ${sessionData ? 'existe' : 'NO existe'}`);
+        
         if (sessionData && sessionData.client) {
           // Verificar si el cliente está realmente conectado
           isClientConnected(sessionData.client).then((connected) => {
@@ -619,24 +980,51 @@ function startSessionInternal(sessionName) {
           });
         }
         
-        // Inicializar contador de intentos QR si no existe
-        if (!sessionData) {
-          console.warn(`⚠️ [${sessionName}] SessionData no encontrado al generar QR (intento ${attempts})`);
-          return;
+        // Asegurar que sessionData existe (debería existir desde startSessionInternal)
+        // Si no existe, crearlo como fallback de seguridad
+        let sessionDataToUse = sessionData;
+        if (!sessionDataToUse) {
+          console.warn(`⚠️ [${sessionName}] SessionData no encontrado al generar QR (intento ${attempts}), creando entrada...`);
+          console.warn(`⚠️ [${sessionName}] Esto no debería pasar si startSessionInternal se ejecutó correctamente`);
+          activeClients.set(sessionName, {
+            client: null,
+            accountPhone: null,
+            connectedAt: null,
+            state: 'INITIALIZING',
+            qrExpiresAt: null,
+            qrUpdateInterval: null,
+            isConnected: false,
+            qrAttempts: 0,
+          });
+          sessionDataToUse = activeClients.get(sessionName);
+          if (!sessionDataToUse) {
+            console.error(`❌ [${sessionName}] Error crítico: No se pudo crear sessionData`);
+            return;
+          }
+          console.log(`✅ [${sessionName}] SessionData creado como fallback`);
         }
         
-        // Incrementar contador de intentos QR
-        if (!sessionData.qrAttempts) {
-          sessionData.qrAttempts = 0;
+        // Inicializar contador de intentos QR si no existe
+        if (typeof sessionDataToUse.qrAttempts !== 'number') {
+          sessionDataToUse.qrAttempts = 0;
         }
-        sessionData.qrAttempts++;
         
         const MAX_QR_ATTEMPTS = 3;
         
-        // Verificar si se ha excedido el límite de intentos
-        if (sessionData.qrAttempts > MAX_QR_ATTEMPTS) {
-          console.warn(`⚠️ [${sessionName}] Límite de intentos QR alcanzado (${sessionData.qrAttempts}/${MAX_QR_ATTEMPTS}). No se generarán más QRs.`);
+        // Verificar si ya se alcanzó el límite ANTES de incrementar
+        if (sessionDataToUse.qrAttempts >= MAX_QR_ATTEMPTS) {
+          console.warn(`⚠️ [${sessionName}] Límite de intentos QR alcanzado (${sessionDataToUse.qrAttempts}/${MAX_QR_ATTEMPTS}). No se generarán más QRs.`);
           console.warn(`🗑️ [${sessionName}] Eliminando tokens de sesión no vinculada...`);
+          
+          // Cerrar el cliente inmediatamente para evitar que WPPConnect genere más QRs
+          if (sessionDataToUse.client) {
+            try {
+              sessionDataToUse.client.close().catch(() => {});
+              console.log(`🔒 [${sessionName}] Cliente cerrado para evitar más QRs`);
+            } catch (err) {
+              console.warn(`⚠️ [${sessionName}] Error cerrando cliente:`, err.message);
+            }
+          }
           
           // Notificar al CRM que se alcanzó el límite
           sendQrToCrm(sessionName, null, 'qr_limit_reached').catch((err) => {
@@ -651,8 +1039,11 @@ function startSessionInternal(sessionName) {
           return; // No procesar este QR
         }
         
+        // Incrementar contador de intentos QR DESPUÉS de verificar
+        sessionDataToUse.qrAttempts++;
+        
         console.log(
-          `📱 [${sessionName}] QR generado (intento ${sessionData.qrAttempts}/${MAX_QR_ATTEMPTS}). Escanea con WhatsApp Business:`
+          `📱 [${sessionName}] QR generado (intento ${sessionDataToUse.qrAttempts}/${MAX_QR_ATTEMPTS}). Escanea con WhatsApp Business:`
         );
         if (process.env.LOG_QR_ASCII === 'true') {
         console.log(asciiQR);
@@ -681,31 +1072,41 @@ function startSessionInternal(sessionName) {
         
         // Configurar el intervalo después de un pequeño delay para asegurar que el cliente esté en el mapa
         setTimeout(() => {
-          const sessionData = activeClients.get(sessionName);
-          if (sessionData) {
-            // Solo configurar intervalo si no está conectado
-            isClientConnected(sessionData.client).then((connected) => {
-              if (!connected) {
+          const sessionDataForInterval = activeClients.get(sessionName);
+          if (sessionDataForInterval) {
+            // Si el cliente ya está asignado, verificar conexión
+            if (sessionDataForInterval.client) {
+              isClientConnected(sessionDataForInterval.client).then((connected) => {
+                if (!connected) {
+                  setupQrUpdateInterval(sessionName, qrInfo);
+                } else {
+                  console.log(`ℹ️ [${sessionName}] Sesión conectada, no se configurará intervalo de QR`);
+                }
+              }).catch(() => {
+                // Si hay error, configurar intervalo por seguridad
                 setupQrUpdateInterval(sessionName, qrInfo);
-              } else {
-                console.log(`ℹ️ [${sessionName}] Sesión conectada, no se configurará intervalo de QR`);
-              }
-            }).catch(() => {
-              // Si hay error, configurar intervalo por seguridad
+              });
+            } else {
+              // Si el cliente aún no está asignado, configurar intervalo de todas formas
+              // El cliente se asignará después y el intervalo funcionará
               setupQrUpdateInterval(sessionName, qrInfo);
-            });
+            }
           } else {
-            // Si el cliente aún no está en el mapa, intentar de nuevo después
+            // Si el sessionData aún no existe, intentar de nuevo después
             setTimeout(() => {
               const sessionDataRetry = activeClients.get(sessionName);
               if (sessionDataRetry) {
-                isClientConnected(sessionDataRetry.client).then((connected) => {
-                  if (!connected) {
+                if (sessionDataRetry.client) {
+                  isClientConnected(sessionDataRetry.client).then((connected) => {
+                    if (!connected) {
+                      setupQrUpdateInterval(sessionName, qrInfo);
+                    }
+                  }).catch(() => {
                     setupQrUpdateInterval(sessionName, qrInfo);
-                  }
-                }).catch(() => {
+                  });
+                } else {
                   setupQrUpdateInterval(sessionName, qrInfo);
-                });
+                }
               }
             }, 1000);
           }
@@ -859,17 +1260,35 @@ function startSessionInternal(sessionName) {
         }, 5000);
       }
 
-      // Guardar cliente activo con información adicional
-      activeClients.set(sessionName, {
-        client,
-        accountPhone,
-        connectedAt: new Date(),
-        state: 'CONNECTED',
-        qrExpiresAt: null,
-        qrUpdateInterval: null,
-        isConnected: false, // Flag para indicar si está conectado (evita generar más QRs)
-        qrAttempts: 0, // Contador de intentos QR (se resetea cuando se solicita nuevo QR o se conecta)
-      });
+      // Actualizar cliente activo con información adicional
+      // Si ya existe sessionData (creado en startSessionInternal), actualizarlo
+      // Si no existe, crearlo (fallback de seguridad)
+      const existingSessionData = activeClients.get(sessionName);
+      if (existingSessionData) {
+        // Actualizar datos existentes manteniendo el contador de intentos QR
+        existingSessionData.client = client;
+        existingSessionData.accountPhone = accountPhone;
+        existingSessionData.connectedAt = new Date();
+        existingSessionData.state = 'CONNECTED';
+        // Mantener qrAttempts si ya existe, sino inicializar en 0
+        if (typeof existingSessionData.qrAttempts !== 'number') {
+          existingSessionData.qrAttempts = 0;
+        }
+        console.log(`✅ [${sessionName}] Cliente actualizado en sessionData existente (qrAttempts: ${existingSessionData.qrAttempts})`);
+      } else {
+        // Crear nuevo si no existe (no debería pasar, pero por seguridad)
+        activeClients.set(sessionName, {
+          client,
+          accountPhone,
+          connectedAt: new Date(),
+          state: 'CONNECTED',
+          qrExpiresAt: null,
+          qrUpdateInterval: null,
+          isConnected: false,
+          qrAttempts: 0,
+        });
+        console.log(`⚠️ [${sessionName}] Cliente creado en nuevo sessionData (no debería pasar)`);
+      }
       
       // Si hay información de QR pendiente, configurar el intervalo
       // Esto puede pasar si el QR se generó antes de que el cliente estuviera en el mapa
@@ -1276,9 +1695,73 @@ app.post('/sessions/:sessionId/request-qr', async (req, res) => {
     return res.status(400).json({ error: 'sessionId is required' });
   }
 
-  const trimmedSessionId = sessionId.trim();
+  // Normalizar el sessionId igual que en el CRM (remover caracteres especiales excepto guiones y guiones bajos)
+  // Esto asegura consistencia entre el CRM y el microservicio
+  let trimmedSessionId = sessionId.trim();
+  const normalizedSessionId = trimmedSessionId.replace(/[^a-zA-Z0-9_\-]/g, '');
+  
+  if (normalizedSessionId !== trimmedSessionId) {
+    console.log(`ℹ️ [${trimmedSessionId}] Nombre de sesión normalizado: "${trimmedSessionId}" -> "${normalizedSessionId}"`);
+    trimmedSessionId = normalizedSessionId;
+  }
+  
+  if (!trimmedSessionId || trimmedSessionId.length < 3) {
+    return res.status(400).json({ 
+      error: 'Invalid sessionId',
+      details: 'El ID de sesión debe tener al menos 3 caracteres después de normalizar (solo letras, números, guiones y guiones bajos)'
+    });
+  }
 
   console.log(`📥 [${trimmedSessionId}] Petición del CRM para iniciar sesión y generar QR`);
+
+  // Limpiar tokens si existen y no hay sesión activa conectada
+  // Simplificado: si hay tokens pero no hay sesión activa, eliminarlos directamente
+  // Esto evita problemas de navegadores bloqueados y es más rápido
+  const tokensPath = path.join(__dirname, '..', 'tokens', trimmedSessionId);
+  if (fs.existsSync(tokensPath)) {
+    // Si no hay sesión activa o la sesión no está conectada, eliminar tokens
+    if (!activeClients.has(trimmedSessionId)) {
+      console.log(`🗑️ [${trimmedSessionId}] Eliminando tokens existentes (no hay sesión activa)...`);
+      try {
+        const removed = await cleanupSessionTokensWithRetry(trimmedSessionId, 2, 1000); // Menos reintentos, más rápido
+        if (removed) {
+          console.log(`✅ [${trimmedSessionId}] Tokens eliminados`);
+          // Esperar un momento para asegurar que el sistema de archivos se actualice
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      } catch (err) {
+        console.warn(`⚠️ [${trimmedSessionId}] No se pudieron eliminar todos los tokens, continuando de todas formas:`, err.message);
+      }
+    } else {
+      // Si hay sesión activa, verificar si está conectada
+      const sessionData = activeClients.get(trimmedSessionId);
+      if (sessionData && sessionData.client) {
+        try {
+          const isConnected = await isClientConnected(sessionData.client);
+          if (!isConnected) {
+            console.log(`🗑️ [${trimmedSessionId}] Sesión existe pero no está conectada, eliminando tokens...`);
+            const removed = await cleanupSessionTokensWithRetry(trimmedSessionId, 2, 1000);
+            if (removed) {
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          }
+        } catch (err) {
+          console.warn(`⚠️ [${trimmedSessionId}] Error verificando conexión, eliminando tokens por seguridad:`, err.message);
+          const removed = await cleanupSessionTokensWithRetry(trimmedSessionId, 2, 1000);
+          if (removed) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+      } else {
+        // Sesión existe pero no tiene cliente, eliminar tokens
+        console.log(`🗑️ [${trimmedSessionId}] Sesión existe pero no tiene cliente, eliminando tokens...`);
+        const removed = await cleanupSessionTokensWithRetry(trimmedSessionId, 2, 1000);
+        if (removed) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    }
+  }
 
   // Si la sesión ya existe y está activa, verificar si está conectada
   if (activeClients.has(trimmedSessionId)) {
@@ -1297,15 +1780,14 @@ app.post('/sessions/:sessionId/request-qr', async (req, res) => {
         // Sesión existe pero no está conectada, limpiar y generar nuevo QR
         console.log(`ℹ️ [${trimmedSessionId}] Sesión existe pero no está conectada, limpiando y generando nuevo QR`);
         cleanupSession(trimmedSessionId);
+        // Los tokens ya fueron verificados y limpiados arriba si no tenían cuenta vinculada
+        // Pero si la sesión existe pero no está conectada, también limpiar tokens por seguridad
         cleanupSessionTokens(trimmedSessionId);
       }
     } else {
       // Limpiar si existe pero no tiene cliente
       cleanupSession(trimmedSessionId);
     }
-  } else {
-    // Limpiar tokens si existen (por si acaso hay tokens de una sesión anterior que expiró)
-    cleanupSessionTokens(trimmedSessionId);
   }
 
   // Resetear contador de intentos QR cuando se solicita un nuevo QR desde el CRM
@@ -1453,6 +1935,58 @@ app.post('/sessions/:sessionId/send', async (req, res) => {
   }
 });
 
+// Endpoint para limpiar completamente una sesión (tokens, cliente, etc.)
+app.delete('/sessions/:sessionId/cleanup', async (req, res) => {
+  const { sessionId } = req.params;
+
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ')
+    ? authHeader.substring('Bearer '.length)
+    : authHeader;
+
+  if (token !== CRM_SYNC_TOKEN) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  if (!sessionId || !sessionId.trim()) {
+    return res.status(400).json({ error: 'sessionId is required' });
+  }
+
+  const trimmedSessionId = sessionId.trim();
+
+  console.log(`🧹 [${trimmedSessionId}] Limpieza completa solicitada desde CRM`);
+
+  try {
+    // Limpiar completamente la sesión
+    await cleanupSessionCompletely(trimmedSessionId, 'Manual cleanup requested from CRM');
+    
+    // Esperar un momento adicional para asegurar que todo se haya cerrado
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    // Intentar eliminar tokens nuevamente con reintentos por si acaso
+    await cleanupSessionTokensWithRetry(trimmedSessionId, 5, 2000);
+    
+    // Forzar cierre de procesos del navegador una vez más
+    await killBrowserProcesses(trimmedSessionId);
+    
+    // Esperar un momento final
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    return res.json({
+      ok: true,
+      message: `Sesión "${trimmedSessionId}" limpiada completamente. IMPORTANTE: Espera al menos 10-15 minutos antes de intentar vincular nuevamente. WhatsApp puede bloquear la vinculación si hay demasiados intentos en poco tiempo.`,
+      sessionId: trimmedSessionId,
+      recommendation: 'Espera 10-15 minutos antes de intentar vincular nuevamente para evitar bloqueos temporales de WhatsApp.',
+    });
+  } catch (error) {
+    console.error(`❌ [${trimmedSessionId}] Error en limpieza completa:`, error.message);
+    return res.status(500).json({
+      error: 'Error cleaning up session',
+      message: error.message,
+    });
+  }
+});
+
 // Manejo de errores global
 app.use((err, req, res, next) => {
   console.error('❌ Error no manejado:', err);
@@ -1541,6 +2075,21 @@ process.on('SIGINT', () => {
     console.log('✅ Sesiones cerradas, saliendo...');
     process.exit(0);
   });
+});
+
+// Manejo de errores no capturados para evitar cierres inesperados
+process.on('uncaughtException', (err) => {
+  console.error('❌ Error no capturado (uncaughtException):', err);
+  console.error('Stack:', err.stack);
+  // No cerrar el proceso, solo registrar el error
+  // El servidor debe seguir funcionando
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Promesa rechazada no manejada (unhandledRejection):', reason);
+  console.error('Promise:', promise);
+  // No cerrar el proceso, solo registrar el error
+  // El servidor debe seguir funcionando
 });
 
 // Inicializar
