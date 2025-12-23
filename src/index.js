@@ -48,9 +48,28 @@ const activeClients = new Map(); // sessionId -> { client, accountPhone, connect
 
 /**
  * Extrae el número de teléfono de un ID de WhatsApp
+ * IMPORTANTE: Si el ID tiene formato especial (ej: "158386180104220:2"), 
+ * extrae solo la parte numérica antes de ":" o "@"
  */
 function extractPhoneFromId(id) {
   if (!id) return '';
+  
+  // Si tiene formato especial con ":" (ej: "158386180104220:2@c.us" o "158386180104220:2")
+  // extraer solo la parte antes de ":"
+  const colonIndex = id.indexOf(':');
+  if (colonIndex !== -1) {
+    // Si tiene ":", es probablemente un ID de grupo o formato especial, no un número real
+    // Extraer la parte antes de ":" para intentar obtener el número
+    const beforeColon = id.substring(0, colonIndex);
+    // Si la parte antes de ":" es solo números y tiene longitud razonable, usarla
+    if (/^\d+$/.test(beforeColon) && beforeColon.length >= 10 && beforeColon.length <= 12) {
+      return beforeColon;
+    }
+    // Si no, retornar vacío porque no es un número válido
+    return '';
+  }
+  
+  // Si no tiene ":", extraer antes de "@" como antes
   const atIndex = id.indexOf('@');
   return atIndex === -1 ? id : id.substring(0, atIndex);
 }
@@ -71,12 +90,32 @@ function normalizePhoneNumber(phoneNumber) {
 
 /**
  * Valida que un número de teléfono tenga formato válido
+ * Los números de teléfono reales normalmente tienen 10-12 dígitos (con código de país)
+ * Números con más de 12 dígitos o con formato especial (":2") no son números válidos
  */
 function isValidPhoneNumber(phoneNumber) {
+  if (!phoneNumber) return false;
+  
+  // Si tiene formato especial con ":", no es un número válido
+  if (phoneNumber.includes(':')) {
+    return false;
+  }
+  
   const normalized = normalizePhoneNumber(phoneNumber);
-  // WhatsApp requiere números de 10-15 dígitos (sin código de país)
-  // Con código de país puede ser más largo
-  return normalized.length >= 10 && normalized.length <= 15;
+  
+  // Validar longitud: números de teléfono reales tienen 10-12 dígitos
+  // (10 dígitos locales + 1-2 dígitos de código de país)
+  // Números con más de 12 dígitos probablemente son IDs, no números reales
+  if (normalized.length < 10 || normalized.length > 12) {
+    return false;
+  }
+  
+  // Validar que sea solo números
+  if (!/^\d+$/.test(normalized)) {
+    return false;
+  }
+  
+  return true;
 }
 
 /**
