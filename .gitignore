@@ -8,6 +8,7 @@ package-lock.json
 
 # Sesiones y tokens de WhatsApp
 tokens/
+.wpp_browser_data/
 .wwebjs_auth/
 .wwebjs_cache/
 baileys_auth_*/

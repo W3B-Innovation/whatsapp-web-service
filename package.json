@@ -17,11 +17,12 @@
   "author": "W3B Innovation",
   "license": "UNLICENSED",
   "dependencies": {
-    "@wppconnect-team/wppconnect": "^1.37.8",
+    "@wppconnect-team/wppconnect": "file:../wppconnect",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "node-fetch": "^2.6.7",
     "nodemon": "^3.1.11",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "tree-kill": "^1.2.2"
   }
 }
