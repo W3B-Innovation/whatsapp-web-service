@@ -503,8 +503,12 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     console.log(`[Group] Message from group "${groupName}", participant: ${contactName || phoneNumber}`);
                 } else {
                     // Mensaje individual
-                    contactName = await getContactName(client, message.from || message.to);
-                    console.log(`[Individual] Message from contact: ${contactName || phoneNumber}`);
+                    const targetId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
+                    const name = await getContactName(client, targetId);
+                    // Si no hay nombre, usar el número limpio
+                    contactName = name || phoneNumber;
+
+                    console.log(`[Individual] Message ${message.fromMe ? 'TO' : 'FROM'} contact: ${contactName} (ID: ${targetId})`);
                 }
 
                 // 7. PROCESAR MEDIA
