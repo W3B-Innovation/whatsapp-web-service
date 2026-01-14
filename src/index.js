@@ -17,10 +17,9 @@ process.on('unhandledRejection', (reason, promise) => {
 // CONFIGURATION
 // ============================================================================
 const PORT = process.env.PORT || 4000;
-const SECRET_KEY = process.env.SECRET_KEY || 'THISISMYSECURETOKEN'; // Use a default or env
+const SECRET_KEY = process.env.SECRET_KEY || 'THISISMYSECURETOKEN';
 const SESSION_LIMIT = parseInt(process.env.SESSION_LIMIT || '5', 10);
 
-// Basic directories for tokens and user data
 const TOKENS_DIR = path.resolve(process.cwd(), 'tokens');
 const BROWSER_DATA_DIR = path.resolve(process.cwd(), '.wpp_browser_data');
 
@@ -30,7 +29,6 @@ if (!fs.existsSync(BROWSER_DATA_DIR)) fs.mkdirSync(BROWSER_DATA_DIR, { recursive
 // ============================================================================
 // STATE STORE
 // ============================================================================
-// Map<sessionId, { client: WppClient, status: string, webhookUrl: string, qr: string|null }>
 const sessions = new Map();
 
 // ============================================================================
@@ -75,6 +73,129 @@ function removeSessionFromFile(session) {
 // HELPER FUNCTIONS
 // ============================================================================
 
+/**
+ * Valida si un número de teléfono es válido
+ * Filtra IDs de grupos, estados, y otros IDs inválidos
+ */
+function isValidPhoneNumber(phoneId) {
+    if (!phoneId || typeof phoneId !== 'string') return false;
+
+    // Remover sufijos de WhatsApp
+    const cleanId = phoneId.replace(/@c.us|@g.us|@s.whatsapp.net|@broadcast/g, '');
+
+    // Debe ser solo dígitos
+    if (!/^\d+$/.test(cleanId)) return false;
+
+    // Longitud válida (entre 8 y 15 dígitos para números internacionales)
+    if (cleanId.length < 8 || cleanId.length > 15) return false;
+
+    // Filtrar IDs que claramente no son números de teléfono
+    // IDs de estados/status suelen ser muy largos (>15 dígitos)
+    if (cleanId.length > 15) return false;
+
+    return true;
+}
+
+/**
+ * Determina si un mensaje es de un grupo
+ */
+function isGroupMessage(message) {
+    // Verificar si el ID contiene @g.us (grupo)
+    if (message.from && message.from.includes('@g.us')) return true;
+    if (message.to && message.to.includes('@g.us')) return true;
+    if (message.chatId && message.chatId.includes('@g.us')) return true;
+
+    // Verificar si tiene información de grupo
+    if (message.isGroupMsg) return true;
+    if (message.chat && message.chat.isGroup) return true;
+
+    return false;
+}
+
+/**
+ * Determina si un mensaje es un estado/status
+ */
+function isStatusMessage(message) {
+    // Estados usan @broadcast o status@broadcast
+    if (message.from && (message.from.includes('@broadcast') || message.from.includes('status'))) return true;
+    if (message.to && (message.to.includes('@broadcast') || message.to.includes('status'))) return true;
+    if (message.chatId && (message.chatId.includes('@broadcast') || message.chatId.includes('status'))) return true;
+
+    // Verificar tipo de mensaje
+    if (message.type === 'status' || message.type === 'e2e_notification') return true;
+
+    // IDs de estados suelen ser muy largos
+    const fromId = message.from ? message.from.replace(/@.*$/g, '') : '';
+    if (fromId.length > 15) return true;
+
+    return false;
+}
+
+/**
+ * Extrae el número de teléfono limpio de un mensaje
+ */
+function extractPhoneNumber(message) {
+    let phoneId = null;
+
+    // Determinar el ID correcto según la dirección del mensaje
+    if (message.fromMe) {
+        // Mensaje saliente: usar 'to'
+        phoneId = message.to || message.chatId;
+    } else {
+        // Mensaje entrante: usar 'from'
+        phoneId = message.from || message.chatId;
+    }
+
+    if (!phoneId) return null;
+
+    // Si es grupo, extraer el número del participante (sender)
+    if (isGroupMessage(message)) {
+        // Para grupos, usar el sender/participant
+        phoneId = message.sender?.id || message.author || message.participant;
+        if (!phoneId) return null;
+    }
+
+    // Limpiar el ID
+    const cleanPhone = phoneId.replace(/@c.us|@g.us|@s.whatsapp.net|@broadcast/g, '');
+
+    // Validar
+    if (!isValidPhoneNumber(cleanPhone)) {
+        console.log(`[Filter] Invalid phone number: ${cleanPhone} from ${phoneId}`);
+        return null;
+    }
+
+    return cleanPhone;
+}
+
+/**
+ * Obtiene el nombre del contacto
+ */
+async function getContactName(client, phoneId) {
+    try {
+        const contact = await client.getContact(phoneId);
+        return contact?.name || contact?.pushname || contact?.verifiedName || null;
+    } catch (e) {
+        console.warn(`Could not get contact name for ${phoneId}:`, e.message);
+        return null;
+    }
+}
+
+/**
+ * Obtiene información del grupo
+ */
+async function getGroupInfo(client, groupId) {
+    try {
+        const chat = await client.getChatById(groupId);
+        return {
+            name: chat?.name || chat?.contact?.name || 'Grupo',
+            isGroup: true
+        };
+    } catch (e) {
+        console.warn(`Could not get group info for ${groupId}:`, e.message);
+        return { name: 'Grupo', isGroup: true };
+    }
+}
+
 async function sendWebhook(url, event, data) {
     if (!url) {
         console.warn('⚠️ [Webhook] No URL provided, skipping event:', event);
@@ -107,7 +228,6 @@ async function sendWebhook(url, event, data) {
 const termitateSession = async (session) => {
     const data = sessions.get(session);
 
-    // Attempt to close client if it exists
     if (data && data.client) {
         try {
             await data.client.close();
@@ -116,7 +236,6 @@ const termitateSession = async (session) => {
         }
     }
 
-    // FORCE KILL PID if needed (Stubborn processes)
     if (data && data.pid) {
         try {
             console.log(`Force killing browser process tree for ${data.pid}...`);
@@ -132,11 +251,9 @@ const termitateSession = async (session) => {
         }
     }
 
-    // Small delay to allow process to release locks
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     const attemptCleanup = async (pathStr) => {
-        // Try up to 10 times (10 seconds)
         for (let i = 0; i < 10; i++) {
             try {
                 if (fs.existsSync(pathStr)) {
@@ -152,11 +269,9 @@ const termitateSession = async (session) => {
 
     await attemptCleanup(path.join(TOKENS_DIR, session));
 
-    // Clean up the specific browser path if we have it
     if (data && data.browserPath) {
         await attemptCleanup(data.browserPath);
     } else {
-        // Fallback to standard path
         await attemptCleanup(path.join(BROWSER_DATA_DIR, session));
     }
 
@@ -166,14 +281,13 @@ const termitateSession = async (session) => {
 
 const startWppSession = async (sessionName, webhookUrl, res = null) => {
     const serviceStartTime = Math.floor(Date.now() / 1000);
-    // Check if session limits reached (if strictly a new session)
+
     if (!sessions.has(sessionName) && sessions.size >= SESSION_LIMIT) {
         const error = `Session limit of ${SESSION_LIMIT} reached.`;
         if (res) return res.status(403).json({ error });
         return;
     }
 
-    // Update session store immediately
     if (!sessions.has(sessionName)) {
         sessions.set(sessionName, {
             client: null,
@@ -184,12 +298,10 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
     }
 
     const sessionData = sessions.get(sessionName);
-    sessionData.webhookUrl = webhookUrl; // Update webhook if provided
+    sessionData.webhookUrl = webhookUrl;
 
-    // PERSISTENCE: Save session info so it survives restarts
     saveSessionToFile(sessionName, webhookUrl);
 
-    // Response promise handling for the initial HTTP request
     let responseSent = false;
     const sendResponse = (data) => {
         if (res && !responseSent) {
@@ -207,9 +319,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
     try {
         console.log(`Starting session: ${sessionName}`);
 
-        // 1. GARBAGE COLLECTION
-        // Scan for ANY old folders belonging to this session name (e.g. nuevasesion-1736...)
-        // and delete them. This cleans up space from previous crashed/locked attempts.
+        // Garbage collection
         try {
             if (fs.existsSync(BROWSER_DATA_DIR)) {
                 const files = fs.readdirSync(BROWSER_DATA_DIR);
@@ -227,24 +337,18 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
             }
         } catch (e) { console.error('GC Error:', e); }
 
-        // 2. SETUP UNIQUE SESSION
         const uniqueId = `${sessionName}-${Date.now()}`;
         const uniqueBrowserPath = path.join(BROWSER_DATA_DIR, uniqueId);
 
-        // Store path for cleanup later
         sessionData.browserPath = uniqueBrowserPath;
 
-        // Try to clean up any OLD standard folders for this session name just in case
-        // This is "best effort" garbage collection
         const standardPath = path.join(BROWSER_DATA_DIR, sessionName);
         if (fs.existsSync(standardPath)) {
             try {
-                // Don't wait on this, just fire and forget or quick attempt
                 fs.rmSync(standardPath, { recursive: true, force: true });
-            } catch (e) { /* ignore EBUSY on legacy folder */ }
+            } catch (e) { /* ignore */ }
         }
 
-        // Create the client
         const client = await wppconnect.create({
             session: sessionName,
             catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
@@ -252,48 +356,43 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 sessionData.qr = base64Qr;
                 sessionData.status = 'WAITING_QR';
 
-                // This is the CRITICAL part: return the QR to the HTTP request
                 sendResponse({
                     status: 'QR_GENERATED',
                     qr: base64Qr,
                     attempts
                 });
 
-                // Auto-cleanup timer if not connected in 60s
-                if (attempts === 1) { // Set timeout only on first attempt
+                if (attempts === 1) {
                     setTimeout(async () => {
                         const currentSession = sessions.get(sessionName);
-                        // Check if still waiting for QR or not connected
                         if (currentSession && (currentSession.status === 'WAITING_QR' || currentSession.status === 'INITIALIZING')) {
                             console.log(`Session ${sessionName} timed out (QR not scanned). Cleaning up...`);
                             await termitateSession(sessionName);
-                            // Notify webhook of expiration
                             sendWebhook(webhookUrl, 'status_change', { session: sessionName, status: 'qr_expired' });
                         }
-                    }, 60000); // 60 seconds
+                    }, 60000);
                 }
             },
             statusFind: (statusSession, session) => {
                 console.log(`Status change for ${sessionName}: ${statusSession}`);
                 sessionData.status = statusSession;
 
-                // Webhook updates
                 sendWebhook(webhookUrl, 'status_change', { session: sessionName, status: statusSession });
 
                 if (statusSession === 'inChat' || statusSession === 'isLogged') {
-                    sessionData.qr = null; // Clear QR once connected
+                    sessionData.qr = null;
                 }
             },
             headless: true,
             devtools: false,
-            useChrome: true, // Back to using Chrome as per library default for better compatibility
+            useChrome: true,
             debug: false,
             logQR: false,
             disableWelcome: true,
             updatesLog: true,
-            autoClose: 60000, // Library default is 60s
-            waitForLogin: true, // Wait for login to be fully ready
-            whatsappVersion: '2.3000.10305x', // Recommended version from wppconnect
+            autoClose: 60000,
+            waitForLogin: true,
+            whatsappVersion: '2.3000.10305x',
             tokenStore: 'file',
             folderNameToken: TOKENS_DIR,
             puppeteerOptions: {
@@ -323,10 +422,8 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
 
         sessionData.client = client;
 
-        // --- NEW: Capture PID for Force Kill ---
+        // Capture PID
         try {
-            // wppconnect client exposes page, page exposes browser, browser exposes process
-            // This might differ by version, so we code defensively
             let browser = null;
             if (client.page && client.page.browser) browser = client.page.browser();
             else if (client.browser) browser = client.browser;
@@ -336,112 +433,150 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 if (proc) {
                     sessionData.pid = proc.pid;
                     console.log(`Captured PID for ${sessionName}: ${proc.pid}`);
-                } else {
-                    console.warn(`Could not get process from browser for ${sessionName}`);
                 }
-            } else {
-                console.warn(`Could not find browser instance on client object for ${sessionName}`);
             }
         } catch (e) { console.error('Could not capture browser PID:', e); }
-        // ---------------------------------------
 
-        // Message Hook
+        // ============================================================================
+        // MENSAJE HANDLER - MEJORADO CON FILTROS
+        // ============================================================================
         client.onAnyMessage(async (message) => {
-            // Normalize timestamp to seconds if needed (WPPConnect sometimes uses MS)
-            let ts = message.timestamp;
-            if (ts && ts > 1000000000000) {
-                ts = Math.floor(ts / 1000);
-            }
+            try {
+                // 1. VALIDAR TIMESTAMP
+                let ts = message.timestamp;
+                if (ts && ts > 1000000000000) {
+                    ts = Math.floor(ts / 1000);
+                }
 
-            console.log(`[DEBUG] Msg: ${message.id} | Type: ${message.type} | TS: ${ts} | ServiceStart: ${serviceStartTime} | Diff: ${ts - serviceStartTime}s | Body: ${message.body ? message.body.substring(0, 20) : 'EMPTY'}`);
+                console.log(`[DEBUG] Msg: ${message.id} | Type: ${message.type} | From: ${message.from} | TS: ${ts}`);
 
-            // Ignore messages older than service start time (prevent history flood)
-            // Also ignore if timestamp is missing
-            if (!ts || ts < serviceStartTime) {
-                console.log(`[Filter] Skipping old message: ${ts} < ${serviceStartTime} (Diff: ${serviceStartTime - ts}s)`);
-                return;
-            }
+                // Ignorar mensajes antiguos
+                if (!ts || ts < serviceStartTime) {
+                    console.log(`[Filter] Skipping old message: ${ts} < ${serviceStartTime}`);
+                    return;
+                }
 
-            // Whitelist allowed message types to avoid system messages (e2e, protocol, etc.)
-            const validTypes = ['chat', 'image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location', 'multi_vcard'];
-            if (!validTypes.includes(message.type)) {
-                console.log(`[Filter] Skipping ignored message type: ${message.type}`);
-                return;
-            }
+                // 2. FILTRAR ESTADOS/STATUS
+                if (isStatusMessage(message)) {
+                    console.log(`[Filter] Skipping status/broadcast message from ${message.from}`);
+                    return;
+                }
 
-            // Filter empty chat messages
-            if (message.type === 'chat' && !message.body) {
-                console.log(`[Filter] Skipping empty chat message`);
-                return;
-            }
+                // 3. VALIDAR TIPO DE MENSAJE
+                const validTypes = ['chat', 'image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location', 'multi_vcard'];
+                if (!validTypes.includes(message.type)) {
+                    console.log(`[Filter] Skipping invalid message type: ${message.type}`);
+                    return;
+                }
 
-            // Sanitize body for media types
-            let cleanBody = message.body;
-            let mediaData = null;
+                // 4. FILTRAR MENSAJES VACÍOS
+                if (message.type === 'chat' && !message.body) {
+                    console.log(`[Filter] Skipping empty chat message`);
+                    return;
+                }
 
-            const mediaTypes = ['image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location'];
+                // 5. EXTRAER NÚMERO DE TELÉFONO VÁLIDO
+                const phoneNumber = extractPhoneNumber(message);
+                if (!phoneNumber) {
+                    console.log(`[Filter] Could not extract valid phone number from message`);
+                    return;
+                }
 
-            if (mediaTypes.includes(message.type)) {
-                console.log(`[Media] Detected media message: ${message.type}`);
-                cleanBody = `[${message.type}]`; // Default placeholder
+                console.log(`[Valid] Processing message from phone: ${phoneNumber}`);
 
-                // Specifically for image/document/audio/sticker, try to download content
-                if (['image', 'video', 'ptt', 'audio', 'sticker', 'document'].includes(message.type)) {
-                    try {
-                        console.log(`[Media] Downloading content for ${message.id}...`);
-                        // WPPConnect returns a Buffer OR a Base64 string depending on version
-                        const result = await client.downloadMedia(message);
-                        if (result) {
-                            if (Buffer.isBuffer(result)) {
-                                mediaData = result.toString('base64');
-                            } else if (typeof result === 'string') {
-                                // If it's a data URI (data:image/jpeg;base64,...), strip the prefix
-                                if (result.startsWith('data:')) {
-                                    mediaData = result.split(',')[1];
-                                } else {
-                                    mediaData = result;
+                // 6. DETERMINAR SI ES GRUPO
+                const isGroup = isGroupMessage(message);
+                let contactName = null;
+                let groupName = null;
+
+                if (isGroup) {
+                    // Obtener información del grupo
+                    const groupInfo = await getGroupInfo(client, message.from || message.chatId);
+                    groupName = groupInfo.name;
+
+                    // Para grupos, también obtener el nombre del participante
+                    const participantId = message.sender?.id || message.author || message.participant;
+                    if (participantId) {
+                        contactName = await getContactName(client, participantId);
+                    }
+
+                    console.log(`[Group] Message from group "${groupName}", participant: ${contactName || phoneNumber}`);
+                } else {
+                    // Mensaje individual
+                    contactName = await getContactName(client, message.from || message.to);
+                    console.log(`[Individual] Message from contact: ${contactName || phoneNumber}`);
+                }
+
+                // 7. PROCESAR MEDIA
+                let cleanBody = message.body;
+                let mediaData = null;
+
+                const mediaTypes = ['image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location'];
+
+                if (mediaTypes.includes(message.type)) {
+                    console.log(`[Media] Detected media message: ${message.type}`);
+                    cleanBody = `[${message.type}]`;
+
+                    if (['image', 'video', 'ptt', 'audio', 'sticker', 'document'].includes(message.type)) {
+                        try {
+                            console.log(`[Media] Downloading content for ${message.id}...`);
+                            const result = await client.downloadMedia(message);
+                            if (result) {
+                                if (Buffer.isBuffer(result)) {
+                                    mediaData = result.toString('base64');
+                                } else if (typeof result === 'string') {
+                                    if (result.startsWith('data:')) {
+                                        mediaData = result.split(',')[1];
+                                    } else {
+                                        mediaData = result;
+                                    }
                                 }
+                                console.log(`[Media] Download success. Base64 length: ${mediaData.length}`);
                             }
-                            console.log(`[Media] Download success. Base64 length: ${mediaData.length}`);
+                        } catch (err) {
+                            console.error(`Error downloading media for message ${message.id}:`, err);
+                            cleanBody = `[Error descargando ${message.type}]`;
                         }
-                    } catch (err) {
-                        console.error(`Error downloading media for message ${message.id}:`, err);
-                        cleanBody = `[Error descargando ${message.type}]`;
                     }
                 }
-            }
 
-            // Safety check for text length
-            if (!mediaData && cleanBody && cleanBody.length > 2000) {
-                cleanBody = '[Contenido largo/Media]';
-            }
-
-            // Helper to remove undefined values for Firestore
-            const cleanPayload = (obj) => JSON.parse(JSON.stringify(obj));
-
-            const payload = cleanPayload({
-                session: sessionName,
-                message: {
-                    id: message.id || '',
-                    from: message.from || '',
-                    to: message.to || '',
-                    body: cleanBody || '',
-                    type: message.type || '',
-                    fromMe: message.fromMe || false,
-                    timestamp: ts || Math.floor(Date.now() / 1000),
-                    sender: message.sender || {},
-                    mediaData: mediaData || null,
-                    mimetype: message.mimetype || ''
+                // Limitar longitud de texto
+                if (!mediaData && cleanBody && cleanBody.length > 2000) {
+                    cleanBody = '[Contenido largo/Media]';
                 }
-            });
 
-            sendWebhook(webhookUrl, 'on_message', payload);
+                // 8. CONSTRUIR PAYLOAD
+                const cleanPayload = (obj) => JSON.parse(JSON.stringify(obj));
+
+                const payload = cleanPayload({
+                    session: sessionName,
+                    message: {
+                        id: message.id || '',
+                        from: message.from || '',
+                        to: message.to || '',
+                        body: cleanBody || '',
+                        type: message.type || '',
+                        fromMe: message.fromMe || false,
+                        timestamp: ts || Math.floor(Date.now() / 1000),
+                        phoneNumber: phoneNumber,
+                        contactName: contactName,
+                        isGroup: isGroup,
+                        groupName: groupName,
+                        sender: message.sender || {},
+                        mediaData: mediaData || null,
+                        mimetype: message.mimetype || ''
+                    }
+                });
+
+                console.log(`[Webhook] Sending message to webhook - Phone: ${phoneNumber}, IsGroup: ${isGroup}, Group: ${groupName || 'N/A'}`);
+                sendWebhook(webhookUrl, 'on_message', payload);
+
+            } catch (error) {
+                console.error(`[Error] Processing message ${message.id}:`, error);
+            }
         });
 
-        // If we are here and response hasn't been sent (e.g. session was already logged in), send success
-        // This happens if catchQR is never called because tokens are valid
         if (!responseSent) {
-            // We can ensure connection state check here
             const state = await client.getConnectionState();
             if (state === 'CONNECTED') {
                 sendResponse({ status: 'ALREADY_CONNECTED', message: 'Session is already active and connected.' });
@@ -456,19 +591,16 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
     }
 };
 
-
 // ============================================================================
 // SERVER
 // ============================================================================
 const app = express();
 app.use(express.json());
 
-// 1. Start Session & Get QR
 app.post('/api/session/start-session', async (req, res) => {
     const { session, webhook } = req.body;
     if (!session) return res.status(400).json({ error: 'Session name is required' });
 
-    // If session exists and is connected, return that
     const existing = sessions.get(session);
     if (existing && existing.client) {
         try {
@@ -476,7 +608,6 @@ app.post('/api/session/start-session', async (req, res) => {
             if (state === 'CONNECTED') {
                 return res.json({ status: 'ALREADY_CONNECTED', message: 'Session is active' });
             } else {
-                // Not connected? Kill it to start fresh
                 console.log(`Session ${session} exists but is state ${state}. Terminating to restart.`);
                 await termitateSession(session);
             }
@@ -484,24 +615,12 @@ app.post('/api/session/start-session', async (req, res) => {
             await termitateSession(session);
         }
     } else if (existing) {
-        // Exists in map but no client? (e.g. INITIALIZING stuck)
         await termitateSession(session);
     }
 
-    // Also check directory existence to be sure no leftover locks
-    try {
-        if (fs.existsSync(path.join(BROWSER_DATA_DIR, session))) {
-            // We can't easily rm -rf if process is running, but terminateSession should have killed it.
-            // Rely on startWppSession to handle it or error out.
-        }
-    } catch (e) { }
-
-    // Start new flow
-    // Note: startWppSession handles the response (res) inside catchQR or on success
     startWppSession(session, webhook, res);
 });
 
-// 2. Get All Sessions Info
 app.get('/api/sessions', (req, res) => {
     const list = [];
     sessions.forEach((val, key) => {
@@ -515,7 +634,6 @@ app.get('/api/sessions', (req, res) => {
     res.json({ sessions: list });
 });
 
-// 3. Get Specific Session Status
 app.get('/api/session/:session/status', async (req, res) => {
     const { session } = req.params;
     const data = sessions.get(session);
@@ -536,14 +654,12 @@ app.get('/api/session/:session/status', async (req, res) => {
     });
 });
 
-// 4. Terminate Session
 app.post('/api/session/:session/terminate', async (req, res) => {
     const { session } = req.params;
     await termitateSession(session);
     res.json({ success: true });
 });
 
-// 5. Send Message
 app.post('/api/session/:session/send-message', async (req, res) => {
     const { session } = req.params;
     const { phone, message } = req.body;
@@ -559,18 +675,14 @@ app.post('/api/session/:session/send-message', async (req, res) => {
 
     try {
         let destination = phone.toString().trim();
-
-        // Basic cleanup: allow only digits, @, -
         destination = destination.replace(/[^\d@\-]/g, '');
 
-        // If it doesn't have a suffix, append @c.us (assuming individual chat)
         if (!destination.includes('@')) {
             destination = `${destination}@c.us`;
         }
 
         console.log(`[Send] Processing send request for ${destination} on session ${session}`);
 
-        // OPTIONAL: Validar existencia del número para obtener el ID real (corrige problemas de 521 vs 52 en MX)
         try {
             const result = await sessionData.client.checkNumberStatus(destination);
             if (result && result.numberExists && result.id && result.id._serialized) {
@@ -578,12 +690,10 @@ app.post('/api/session/:session/send-message', async (req, res) => {
                 destination = result.id._serialized;
             } else if (result && !result.numberExists) {
                 console.warn(`[Send] Warning: WhatsApp says ${destination} does not exist.`);
-                // We might still try to send or return error. Let's return error to be safe/clear.
                 return res.status(400).json({ error: 'Number does not exist on WhatsApp', details: result });
             }
         } catch (e) {
             console.warn(`[Send] checkNumberStatus failed for ${destination}: ${e.message}. Attempting to send using raw JID.`);
-            // Fallback: Si falla el chequeo (timeout, etc), intentamos enviar con el JID construido manualmente
         }
 
         const result = await sessionData.client.sendText(destination, message);
@@ -592,6 +702,48 @@ app.post('/api/session/:session/send-message', async (req, res) => {
         res.json({ success: true, message: 'Message sent', messageId: result?.id, to: destination });
     } catch (error) {
         console.error(`Error sending message on session ${session}:`, error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/session/:session/call', async (req, res) => {
+    const { session } = req.params;
+    const { phone, isVideo } = req.body;
+
+    if (!phone) {
+        return res.status(400).json({ error: 'Phone is required' });
+    }
+
+    const sessionData = sessions.get(session);
+    if (!sessionData || !sessionData.client) {
+        return res.status(404).json({ error: 'Session not found or not connected' });
+    }
+
+    try {
+        let destination = phone.toString().trim();
+        destination = destination.replace(/[^\d@\-]/g, '');
+
+        if (!destination.includes('@')) {
+            destination = `${destination}@c.us`;
+        }
+
+        console.log(`[Call] Attempting to call ${destination} on session ${session}`);
+
+        const result = await sessionData.client.page.evaluate(async (to, video) => {
+            if (typeof window.WPP === 'undefined') {
+                throw new Error('WPP is not injected or not ready');
+            }
+            if (!window.WPP.call) {
+                throw new Error('WPP.call namespace is missing');
+            }
+            return await window.WPP.call.offer(to, { isVideo: !!video });
+        }, destination, isVideo);
+
+        console.log(`[Call] Call initiated successfully:`, result);
+        res.json({ success: true, result });
+
+    } catch (error) {
+        console.error(`Error making call on session ${session}:`, error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -613,22 +765,17 @@ const restoreSessions = async () => {
 
     for (const name of sessionNames) {
         const data = stored[name];
-        // Skip if somehow already running (shouldn't happen on fresh start)
         if (sessions.has(name)) continue;
 
         console.log(`🚀 [Restore] Starting session: ${name}`);
-        // We do NOT await the full connection here, but we insert a stagger delay
-        // so we don't hammer the CPU launching 5 browsers at once.
         startWppSession(name, data.webhookUrl).catch(err => {
             console.error(`❌ [Restore] Failed to restore session ${name}:`, err);
         });
 
-        // Wait a few seconds between launches
         await new Promise(r => setTimeout(r, 5000));
     }
 };
 
-// Start restoration process
 restoreSessions();
 
 app.listen(PORT, () => {
