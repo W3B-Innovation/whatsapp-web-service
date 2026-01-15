@@ -1,8 +1,8 @@
 {
-  "test": {
+  "test2": {
     "webhookUrl": "http://localhost:3000/api/whatsapp/web-sync/webhook"
   },
-  "test2": {
+  "test": {
     "webhookUrl": "http://localhost:3000/api/whatsapp/web-sync/webhook"
   }
 }

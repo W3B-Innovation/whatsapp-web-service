@@ -124,9 +124,12 @@ function isStatusMessage(message) {
     // Verificar tipo de mensaje
     if (message.type === 'status' || message.type === 'e2e_notification') return true;
 
-    // IDs de estados suelen ser muy largos
+    // IDs de estados suelen ser muy largos, PERO los grupos (@g.us) también.
+    // Ignorar esta validación si es un grupo.
     const fromId = message.from ? message.from.replace(/@.*$/g, '') : '';
-    if (fromId.length > 15) return true;
+    const isGroup = message.from && message.from.includes('@g.us');
+
+    if (!isGroup && fromId.length > 15) return true;
 
     return false;
 }
@@ -139,7 +142,8 @@ function extractPhoneNumber(message) {
 
     // Determinar el ID correcto según la dirección del mensaje
     if (message.fromMe) {
-        // Mensaje saliente: usar 'to'
+        // Mensaje saliente: usar 'to' (generalmente el ID del chat/grupo/usuario destino)
+        // OJO: message.to es el destinatario real. message.chatId a veces es el LID del usuario propio si lo manda desde otro dispositivo.
         phoneId = message.to || message.chatId;
     } else {
         // Mensaje entrante: usar 'from'
@@ -148,18 +152,26 @@ function extractPhoneNumber(message) {
 
     if (!phoneId) return null;
 
-    // Si es grupo, extraer el número del participante (sender)
+    // Si es grupo, NO extraer el número del participante aquí.
+    // Queremos que el ID de la "Conversación" sea el ID del Grupo.
+    // El participante se maneja por separado para el contactName.
+    /*
     if (isGroupMessage(message)) {
         // Para grupos, usar el sender/participant
         phoneId = message.sender?.id || message.author || message.participant;
         if (!phoneId) return null;
     }
+    */
 
-    // Limpiar el ID
-    const cleanPhone = phoneId.replace(/@c.us|@g.us|@s.whatsapp.net|@broadcast/g, '');
+    // Limpiar el ID (Soporte para @lid que es el nuevo formato de ID privado)
+    // También @g.us y otros
+    const cleanPhone = phoneId.replace(/@c.us|@g.us|@s.whatsapp.net|@broadcast|@lid/g, '');
 
     // Validar
     if (!isValidPhoneNumber(cleanPhone)) {
+        // Si es un grupo, a veces el ID es largo y válido, intentemos confiar si tiene @g.us el original
+        if (phoneId.includes('@g.us')) return cleanPhone;
+
         console.log(`[Filter] Invalid phone number: ${cleanPhone} from ${phoneId}`);
         return null;
     }
@@ -483,24 +495,102 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 }
 
                 console.log(`[Valid] Processing message from phone: ${phoneNumber}`);
+                console.log(`[Debug] Message body:`, message.body);
+                console.log(`[Debug] Message has mentionedIds:`, message.mentionedIds || 'None');
+
+                // Procesar menciones - Intentar de dos formas:
+                // 1. Usando mentionedIds si está disponible
+                // 2. Parseando el body del mensaje si mentionedIds está vacío
+
+                let mentionsToProcess = [];
+
+                if (message.mentionedIds && message.mentionedIds.length > 0) {
+                    mentionsToProcess = message.mentionedIds;
+                    console.log(`[Mentions] Using mentionedIds field:`, mentionsToProcess);
+                } else if (message.body && message.body.includes('@')) {
+                    // Detectar menciones en el body (formato: @22660348166233)
+                    const mentionPattern = /@(\d{10,})/g;
+                    const matches = [...message.body.matchAll(mentionPattern)];
+                    if (matches.length > 0) {
+                        mentionsToProcess = matches.map(m => m[1]); // Solo los números
+                        console.log(`[Mentions] Extracted from body:`, mentionsToProcess);
+                    }
+                }
+
+                if (mentionsToProcess.length > 0) {
+                    console.log(`[Mentions] Processing ${mentionsToProcess.length} mentions:`, mentionsToProcess);
+
+                    for (const mentionId of mentionsToProcess) {
+                        try {
+                            // Limpiar el ID primero (por si viene con @c.us, @lid, etc.)
+                            const cleanId = mentionId.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid/g, '');
+
+                            // Intentar obtener el nombre con diferentes formatos de ID
+                            let mentionedName = null;
+
+                            // Intento 1: ID original
+                            mentionedName = await getContactName(client, mentionId);
+
+                            // Intento 2: Si falla y el ID no tiene @, probar con @c.us
+                            if (!mentionedName && !mentionId.includes('@')) {
+                                mentionedName = await getContactName(client, `${cleanId}@c.us`);
+                            }
+
+                            // Intento 3: Si aún no hay nombre, probar con @lid
+                            if (!mentionedName) {
+                                mentionedName = await getContactName(client, `${cleanId}@lid`);
+                            }
+
+                            // Fallback: Si no encontramos nombre, usar formato limpio del número
+                            if (!mentionedName) {
+                                // Para números largos, tomar los últimos 10 dígitos
+                                mentionedName = cleanId.length > 10 ? cleanId.slice(-10) : cleanId;
+                                console.log(`[Mentions] No name found for ${mentionId}, using fallback: ${mentionedName}`);
+                            } else {
+                                console.log(`[Mentions] Resolved ${mentionId} to: ${mentionedName}`);
+                            }
+
+                            // Reemplazar en el cuerpo del mensaje
+                            const mentionRegex = new RegExp(`@${cleanId}`, 'g');
+                            message.body = message.body.replace(mentionRegex, `@${mentionedName}`);
+                        } catch (err) {
+                            console.warn(`[Mentions] Error resolving mention for ${mentionId}:`, err);
+                        }
+                    }
+                }
 
                 // 6. DETERMINAR SI ES GRUPO
                 const isGroup = isGroupMessage(message);
                 let contactName = null;
                 let groupName = null;
+                let senderName = null; // Nuevo: para identificar quién envió el mensaje específico
 
                 if (isGroup) {
                     // Obtener información del grupo
-                    const groupInfo = await getGroupInfo(client, message.from || message.chatId);
-                    groupName = groupInfo.name;
+                    const rawGroupId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
+                    const groupInfo = await getGroupInfo(client, rawGroupId);
+                    groupName = groupInfo.name || "Grupo";
 
-                    // Para grupos, también obtener el nombre del participante
-                    const participantId = message.sender?.id || message.author || message.participant;
-                    if (participantId) {
-                        contactName = await getContactName(client, participantId);
+                    // Para grupos: contactName es el nombre del grupo (para agrupar conversación)
+                    contactName = groupName;
+
+                    // Para grupos: senderName es quien envió el mensaje
+                    const participantId = message.author || message.sender?.id || message.participant;
+
+                    if (message.fromMe) {
+                        // Si fui yo (desde el celular o web), poner "Tú"
+                        senderName = 'Tú';
+                    } else if (participantId) {
+                        const pName = await getContactName(client, participantId);
+                        // Limpiar ID de LIDs que tienen formato 12345:22@lid
+                        const cleanPId = participantId.replace(/(:.*$|@.*$)/g, '');
+                        // Si no tiene nombre, usar el número/ID limpio
+                        senderName = pName || cleanPId;
+                    } else {
+                        senderName = 'Unknown';
                     }
 
-                    console.log(`[Group] Message from group "${groupName}", participant: ${contactName || phoneNumber}`);
+                    console.log(`[Group] Group: "${groupName}", sender: ${senderName} (Participant ID: ${participantId})`);
                 } else {
                     // Mensaje individual
                     const targetId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
@@ -508,7 +598,14 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     // Si no hay nombre, usar el número limpio
                     contactName = name || phoneNumber;
 
-                    console.log(`[Individual] Message ${message.fromMe ? 'TO' : 'FROM'} contact: ${contactName} (ID: ${targetId})`);
+                    // Asignar senderName: "Tú" si es saliente, nombre del contacto si es entrante
+                    if (message.fromMe) {
+                        senderName = 'Tú';
+                    } else {
+                        senderName = contactName;
+                    }
+
+                    console.log(`[Individual] Message ${message.fromMe ? 'TO' : 'FROM'} contact: ${contactName}, sender: ${senderName} (ID: ${targetId})`);
                 }
 
                 // 7. PROCESAR MEDIA
@@ -564,6 +661,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                         timestamp: ts || Math.floor(Date.now() / 1000),
                         phoneNumber: phoneNumber,
                         contactName: contactName,
+                        senderName: senderName,
                         isGroup: isGroup,
                         groupName: groupName,
                         sender: message.sender || {},
