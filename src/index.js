@@ -135,6 +135,44 @@ function isStatusMessage(message) {
 }
 
 /**
+ * Detecta si un phoneId es un LID (Local Identifier)
+ * Los LIDs tienen formato: 86299532898535:22@lid o similar
+ */
+function isLID(phoneId) {
+    return phoneId && (phoneId.includes('@lid') || phoneId.includes(':'));
+}
+
+/**
+ * Intenta extraer el número real de teléfono desde un LID
+ * LID formato: 86299532898535:22@lid o 224206520340679@lid
+ * Puede contener un número de teléfono codificado
+ */
+function extractPhoneFromLID(lidString) {
+    if (!lidString) return null;
+
+    // Remover sufijos
+    let cleaned = lidString.replace(/@lid|@c\.us|@s\.whatsapp\.net/g, '');
+
+    // Si tiene formato "numero:algo", tomar solo la parte antes de ":"
+    if (cleaned.includes(':')) {
+        const parts = cleaned.split(':');
+        cleaned = parts[0];
+    }
+
+    // El primer dígito y los siguientes podrían ser el número real
+    // Ejemplo: 86299532898535 podría ser un LID que esconde 529953289853
+    // Los LIDs suelen empezar con el código de país
+
+    // Si el número tiene más de 15 dígitos, es probablemente un LID puro (no contiene número real)
+    if (cleaned.length > 15) {
+        console.log(`[LID] Very long ID detected: ${cleaned} - likely pure LID without phone number`);
+        return null;
+    }
+
+    return cleaned;
+}
+
+/**
  * Extrae el número de teléfono limpio de un mensaje
  */
 function extractPhoneNumber(message) {
@@ -155,13 +193,25 @@ function extractPhoneNumber(message) {
     // Si es grupo, NO extraer el número del participante aquí.
     // Queremos que el ID de la "Conversación" sea el ID del Grupo.
     // El participante se maneja por separado para el contactName.
-    /*
-    if (isGroupMessage(message)) {
-        // Para grupos, usar el sender/participant
-        phoneId = message.sender?.id || message.author || message.participant;
-        if (!phoneId) return null;
+
+    // MEJORA: Detectar si es un LID
+    if (isLID(phoneId)) {
+        console.log(`[LID] Detected LID format: ${phoneId}`);
+
+        // Intentar extraer número del LID
+        const extractedPhone = extractPhoneFromLID(phoneId);
+
+        if (extractedPhone && isValidPhoneNumber(extractedPhone)) {
+            console.log(`[LID] Extracted valid phone from LID: ${extractedPhone}`);
+            return extractedPhone;
+        }
+
+        // Si no pudimos extraer número válido del LID, usar el LID limpio como ID
+        // (esto es para contactos comerciales que realmente no tienen número de teléfono tradicional)
+        const lidCleaned = phoneId.replace(/@lid|@c\.us|@s\.whatsapp\.net|@broadcast/g, '').split(':')[0];
+        console.log(`[LID] Using cleaned LID as identifier: ${lidCleaned}`);
+        return lidCleaned;
     }
-    */
 
     // Limpiar el ID (Soporte para @lid que es el nuevo formato de ID privado)
     // También @g.us y otros
@@ -191,6 +241,40 @@ async function getContactName(client, phoneId) {
         return null;
     }
 }
+
+/**
+ * Intenta obtener el número de teléfono REAL de un contacto
+ * Útil para LIDs donde el ID no es el número de teléfono verdadero
+ */
+async function getRealPhoneNumber(client, phoneId) {
+    try {
+        const contact = await client.getContact(phoneId);
+
+        // Intentar obtener el número real del contacto
+        if (contact) {
+            // contact.id._serialized puede tener el número real
+            // contact.number puede tener el número
+            const realNumber = contact.number || contact.id?._serialized || contact.id;
+
+            if (realNumber && typeof realNumber === 'string') {
+                // Limpiar y validar
+                const cleaned = realNumber.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '').split(':')[0];
+
+                if (isValidPhoneNumber(cleaned)) {
+                    console.log(`[RealPhone] Found real number: ${cleaned} for ID: ${phoneId}`);
+                    return cleaned;
+                }
+            }
+        }
+
+        console.warn(`[RealPhone] Could not extract real phone number for ${phoneId}`);
+        return null;
+    } catch (e) {
+        console.warn(`[RealPhone] Error getting real phone for ${phoneId}:`, e.message);
+        return null;
+    }
+}
+
 
 /**
  * Obtiene información del grupo
@@ -237,7 +321,60 @@ async function sendWebhook(url, event, data) {
 // WPPCONNECT LOGIC
 // ============================================================================
 
-const termitateSession = async (session) => {
+/**
+ * Cierra una sesión sin eliminar tokens (para uso en shutdown)
+ * Mantiene la persistencia para que la sesión pueda restaurarse
+ */
+const closeSession = async (session) => {
+    console.log(`[Close] Closing session: ${session} (preserving tokens)`);
+    const data = sessions.get(session);
+
+    if (data && data.client) {
+        try {
+            await data.client.close();
+            console.log(`[Close] Client closed for ${session}`);
+        } catch (e) {
+            console.error(`[Close] Error closing client for ${session}:`, e.message);
+        }
+    }
+
+    if (data && data.pid) {
+        try {
+            console.log(`[Close] Killing browser process tree for ${session} (PID: ${data.pid})...`);
+            await new Promise((resolve) => {
+                kill(data.pid, 'SIGKILL', (err) => {
+                    if (err) console.warn(`[Close] Kill failed for ${data.pid}:`, err.message);
+                    resolve();
+                });
+            });
+        } catch (e) {
+            // Ignore error
+        }
+    }
+
+    // Solo limpiar browser data temporal, NO los tokens
+    if (data && data.browserPath) {
+        try {
+            if (fs.existsSync(data.browserPath)) {
+                fs.rmSync(data.browserPath, { recursive: true, force: true });
+                console.log(`[Close] Browser data cleaned for ${session}`);
+            }
+        } catch (e) {
+            console.warn(`[Close] Could not delete browser data: ${e.message}`);
+        }
+    }
+
+    // Remover de memoria pero MANTENER en sessions.json y tokens/
+    sessions.delete(session);
+    console.log(`[Close] Session ${session} closed (tokens preserved)`);
+};
+
+/**
+ * Termina y ELIMINA completamente una sesión (tokens incluidos)
+ * Solo se usa cuando el usuario elimina explícitamente la sesión desde el CRM
+ */
+const terminateAndDeleteSession = async (session) => {
+    console.log(`[Terminate] Completely deleting session: ${session}`);
     const data = sessions.get(session);
 
     if (data && data.client) {
@@ -279,6 +416,7 @@ const termitateSession = async (session) => {
         }
     };
 
+    // ELIMINAR tokens (esto requiere volver a escanear QR)
     await attemptCleanup(path.join(TOKENS_DIR, session));
 
     if (data && data.browserPath) {
@@ -289,7 +427,11 @@ const termitateSession = async (session) => {
 
     sessions.delete(session);
     removeSessionFromFile(session);
+    console.log(`[Terminate] Session ${session} completely deleted`);
 };
+
+// Mantener alias para compatibilidad con código existente
+const termitateSession = terminateAndDeleteSession;
 
 const startWppSession = async (sessionName, webhookUrl, res = null) => {
     const serviceStartTime = Math.floor(Date.now() / 1000);
@@ -331,35 +473,14 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
     try {
         console.log(`Starting session: ${sessionName}`);
 
-        // Garbage collection
-        try {
-            if (fs.existsSync(BROWSER_DATA_DIR)) {
-                const files = fs.readdirSync(BROWSER_DATA_DIR);
-                for (const file of files) {
-                    if (file.startsWith(`${sessionName}-`) || file === sessionName) {
-                        const oldPath = path.join(BROWSER_DATA_DIR, file);
-                        try {
-                            console.log(`GC: Deleting stale folder ${oldPath}`);
-                            fs.rmSync(oldPath, { recursive: true, force: true });
-                        } catch (e) {
-                            console.warn(`GC: Could not delete ${oldPath} (might be locked): ${e.message}`);
-                        }
-                    }
-                }
-            }
-        } catch (e) { console.error('GC Error:', e); }
+        // Garbage collection eliminado - ahora reutilizamos las carpetas existentes
+        // para permitir persistencia de sesiones
 
-        const uniqueId = `${sessionName}-${Date.now()}`;
-        const uniqueBrowserPath = path.join(BROWSER_DATA_DIR, uniqueId);
 
-        sessionData.browserPath = uniqueBrowserPath;
-
-        const standardPath = path.join(BROWSER_DATA_DIR, sessionName);
-        if (fs.existsSync(standardPath)) {
-            try {
-                fs.rmSync(standardPath, { recursive: true, force: true });
-            } catch (e) { /* ignore */ }
-        }
+        // Usar ruta estándar para el browser data (sin timestamp único)
+        // Esto permite que WPPConnect reutilice la sesión existente
+        const browserPath = path.join(BROWSER_DATA_DIR, sessionName);
+        sessionData.browserPath = browserPath;
 
         const client = await wppconnect.create({
             session: sessionName,
@@ -408,7 +529,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
             tokenStore: 'file',
             folderNameToken: TOKENS_DIR,
             puppeteerOptions: {
-                userDataDir: uniqueBrowserPath,
+                userDataDir: browserPath, // Usar ruta estándar sin timestamp
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
@@ -488,10 +609,21 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 }
 
                 // 5. EXTRAER NÚMERO DE TELÉFONO VÁLIDO
-                const phoneNumber = extractPhoneNumber(message);
+                let phoneNumber = extractPhoneNumber(message);
                 if (!phoneNumber) {
                     console.log(`[Filter] Could not extract valid phone number from message`);
                     return;
+                }
+
+                // 5.5 MEJORA: Si detectamos un LID, intentar obtener el número real
+                const originalPhoneId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
+                if (originalPhoneId && isLID(originalPhoneId)) {
+                    console.log(`[LID] Attempting to get real phone number for LID: ${originalPhoneId}`);
+                    const realPhone = await getRealPhoneNumber(client, originalPhoneId);
+                    if (realPhone && realPhone !== phoneNumber) {
+                        console.log(`[LID] Replaced LID-based phone ${phoneNumber} with real phone: ${realPhone}`);
+                        phoneNumber = realPhone;
+                    }
                 }
 
                 console.log(`[Valid] Processing message from phone: ${phoneNumber}`);
@@ -888,12 +1020,18 @@ app.listen(PORT, () => {
 // GRACEFUL SHUTDOWN
 // ============================================================================
 const cleanupAllSessions = async () => {
-    console.log('Shutting down... Cleaning all sessions.');
+    console.log('🛑 [Shutdown] Gracefully shutting down microservice...');
+    console.log(`🔄 [Shutdown] Closing ${sessions.size} active sessions (preserving tokens for restart)...`);
+
     for (const session of sessions.keys()) {
-        await termitateSession(session);
+        await closeSession(session); // Usar closeSession en vez de termitateSession
     }
+
+    console.log('✅ [Shutdown] All sessions closed. Tokens and sessions.json preserved.');
+    console.log('💡 [Shutdown] Sessions will automatically restore on next startup.');
     process.exit(0);
 };
 
 process.on('SIGINT', cleanupAllSessions);
 process.on('SIGTERM', cleanupAllSessions);
+
