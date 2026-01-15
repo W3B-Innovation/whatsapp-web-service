@@ -231,13 +231,34 @@ function extractPhoneNumber(message) {
 
 /**
  * Obtiene el nombre del contacto
+ * Intenta múltiples fuentes en orden de preferencia
  */
 async function getContactName(client, phoneId) {
     try {
         const contact = await client.getContact(phoneId);
-        return contact?.name || contact?.pushname || contact?.verifiedName || null;
+
+        if (!contact) {
+            console.warn(`[ContactName] Contact not found for ${phoneId}`);
+            return null;
+        }
+
+        // Intentar diferentes fuentes del nombre en orden de preferencia
+        const name = contact.name ||           // Nombre guardado en agenda
+            contact.pushname ||         // Nombre de WhatsApp del usuario
+            contact.verifiedName ||     // Nombre verificado (business)
+            contact.shortName ||        // Nombre corto
+            contact.formattedName ||    // Nombre formateado
+            null;
+
+        if (name) {
+            console.log(`[ContactName] ✓ Found name "${name}" for ${phoneId}`);
+        } else {
+            console.warn(`[ContactName] No name found for ${phoneId}`);
+        }
+
+        return name;
     } catch (e) {
-        console.warn(`Could not get contact name for ${phoneId}:`, e.message);
+        console.warn(`[ContactName] Error getting contact name for ${phoneId}:`, e.message);
         return null;
     }
 }
@@ -245,26 +266,60 @@ async function getContactName(client, phoneId) {
 /**
  * Intenta obtener el número de teléfono REAL de un contacto
  * Útil para LIDs donde el ID no es el número de teléfono verdadero
+ * Usa getPnLidEntry para LIDs y análisis profundo de Contact para otros casos
  */
 async function getRealPhoneNumber(client, phoneId) {
     try {
+        // OPCIÓN 1: Usar getPnLidEntry (más confiable para LIDs)
+        if (isLID(phoneId)) {
+            try {
+                console.log(`[PnLid] Attempting getPnLidEntry for LID: ${phoneId}`);
+                const result = await client.getPnLidEntry(phoneId);
+
+                if (result && result.phoneNumber) {
+                    const cleaned = result.phoneNumber.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '');
+
+                    if (isValidPhoneNumber(cleaned)) {
+                        console.log(`[PnLid] ✓ Found phone number via getPnLidEntry: ${cleaned} for LID: ${phoneId}`);
+                        return cleaned;
+                    }
+                }
+            } catch (lidError) {
+                console.warn(`[PnLid] getPnLidEntry failed for ${phoneId}, trying fallback methods...`, lidError.message);
+            }
+        }
+
+        // OPCIÓN 2: Usar getContact (fallback o para IDs normales)
         const contact = await client.getContact(phoneId);
 
-        // Intentar obtener el número real del contacto
         if (contact) {
-            // contact.id._serialized puede tener el número real
-            // contact.number puede tener el número
-            const realNumber = contact.number || contact.id?._serialized || contact.id;
+            // Intentar diferentes fuentes del número en orden de confiabilidad
+            const possibleNumbers = [
+                contact.number,           // Número directo si está disponible
+                contact.id?.user,         // El campo 'user' en el ID generalmente tiene el número
+                contact.id?._serialized,  // ID serializado completo
+                contact.id                // ID como string
+            ];
 
-            if (realNumber && typeof realNumber === 'string') {
-                // Limpiar y validar
-                const cleaned = realNumber.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '').split(':')[0];
+            for (const realNumber of possibleNumbers) {
+                if (realNumber && typeof realNumber === 'string') {
+                    // Limpiar y validar
+                    const cleaned = realNumber.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '').split(':')[0];
 
-                if (isValidPhoneNumber(cleaned)) {
-                    console.log(`[RealPhone] Found real number: ${cleaned} for ID: ${phoneId}`);
-                    return cleaned;
+                    if (isValidPhoneNumber(cleaned)) {
+                        console.log(`[RealPhone] ✓ Found real number: ${cleaned} for ID: ${phoneId}`);
+                        return cleaned;
+                    }
                 }
             }
+
+            // Log del contacto para debugging si no pudimos extraer el número
+            console.warn(`[RealPhone] Contact found but no valid number extracted. Contact structure:`, {
+                id: contact.id,
+                number: contact.number,
+                hasName: !!contact.name,
+                hasPushname: !!contact.pushname
+            });
         }
 
         console.warn(`[RealPhone] Could not extract real phone number for ${phoneId}`);
@@ -272,6 +327,96 @@ async function getRealPhoneNumber(client, phoneId) {
     } catch (e) {
         console.warn(`[RealPhone] Error getting real phone for ${phoneId}:`, e.message);
         return null;
+    }
+}
+
+
+/**
+ * Obtiene información completa del contacto (nombre y número de teléfono)
+ * Más eficiente que llamar getContactName y getRealPhoneNumber por separado
+ * @returns {Object} { name: string|null, phoneNumber: string|null, contact: Object }
+ */
+async function getContactInfo(client, phoneId) {
+    try {
+        let phoneNumber = null;
+        let contact = null;
+
+        // Para LIDs, intentar primero getPnLidEntry que da toda la info
+        if (isLID(phoneId)) {
+            try {
+                console.log(`[ContactInfo] Attempting getPnLidEntry for LID: ${phoneId}`);
+                const result = await client.getPnLidEntry(phoneId);
+
+                if (result) {
+                    // Extraer número de teléfono del resultado
+                    if (result.phoneNumber) {
+                        const cleaned = result.phoneNumber.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '');
+                        if (isValidPhoneNumber(cleaned)) {
+                            phoneNumber = cleaned;
+                            console.log(`[ContactInfo] ✓ Phone from getPnLidEntry: ${phoneNumber}`);
+                        }
+                    }
+
+                    // Si hay contactInfo en el resultado, puede tener el nombre
+                    if (result.contactInfo) {
+                        contact = result.contactInfo;
+                    }
+                }
+            } catch (lidError) {
+                console.warn(`[ContactInfo] getPnLidEntry failed for ${phoneId}:`, lidError.message);
+            }
+        }
+
+        // Obtener el contacto si no lo tenemos aún
+        if (!contact) {
+            contact = await client.getContact(phoneId);
+        }
+
+        if (!contact) {
+            console.warn(`[ContactInfo] Contact not found for ${phoneId}`);
+            return { name: null, phoneNumber, contact: null };
+        }
+
+        // Extraer nombre
+        const name = contact.name ||
+            contact.pushname ||
+            contact.verifiedName ||
+            contact.shortName ||
+            contact.formattedName ||
+            null;
+
+        // Extraer número de teléfono si no lo obtuvimos antes
+        if (!phoneNumber) {
+            const possibleNumbers = [
+                contact.number,
+                contact.id?.user,
+                contact.id?._serialized,
+                contact.id
+            ];
+
+            for (const num of possibleNumbers) {
+                if (num && typeof num === 'string') {
+                    const cleaned = num.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '').split(':')[0];
+                    if (isValidPhoneNumber(cleaned)) {
+                        phoneNumber = cleaned;
+                        break;
+                    }
+                }
+            }
+        }
+
+        console.log(`[ContactInfo] ✓ Retrieved info for ${phoneId}: name="${name}", phone="${phoneNumber}"`);
+
+        return {
+            name,
+            phoneNumber,
+            contact,
+            isBusiness: contact.isBusiness || false,
+            isMyContact: contact.isMyContact || false
+        };
+    } catch (e) {
+        console.warn(`[ContactInfo] Error getting contact info for ${phoneId}:`, e.message);
+        return { name: null, phoneNumber: null, contact: null };
     }
 }
 
@@ -937,6 +1082,51 @@ app.post('/api/session/:session/send-message', async (req, res) => {
     } catch (error) {
         console.error(`Error sending message on session ${session}:`, error);
         res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================================================
+// CONTACT INFORMATION ENDPOINT
+// ============================================================================
+/**
+ * Endpoint para obtener información de un contacto (nombre y número de teléfono)
+ * Útil para contactos no registrados o con formato LID
+ */
+app.post('/api/session/:session/contact-info', async (req, res) => {
+    const { session } = req.params;
+    const { contactId } = req.body;
+
+    if (!contactId) {
+        return res.status(400).json({ error: 'contactId is required' });
+    }
+
+    const sessionData = sessions.get(session);
+    if (!sessionData || !sessionData.client) {
+        return res.status(404).json({ error: 'Session not found or not connected' });
+    }
+
+    try {
+        console.log(`[ContactInfo API] Getting info for ${contactId} on session ${session}`);
+
+        const info = await getContactInfo(sessionData.client, contactId);
+
+        console.log(`[ContactInfo API] ✓ Retrieved info:`, info);
+
+        res.json({
+            success: true,
+            contactId,
+            name: info.name,
+            phoneNumber: info.phoneNumber,
+            isBusiness: info.isBusiness,
+            isMyContact: info.isMyContact
+        });
+    } catch (error) {
+        console.error(`[ContactInfo API] Error getting contact info for ${contactId}:`, error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            contactId
+        });
     }
 });
 
