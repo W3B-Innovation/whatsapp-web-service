@@ -344,8 +344,12 @@ async function getContactInfo(client, phoneId) {
         // Para LIDs, intentar primero getPnLidEntry que da toda la info
         if (isLID(phoneId)) {
             try {
-                console.log(`[ContactInfo] Attempting getPnLidEntry for LID: ${phoneId}`);
+                console.log(`[ContactInfo] 🔍 Attempting getPnLidEntry for LID: ${phoneId}`);
+                console.log(`[ContactInfo] 🔍 getPnLidEntry exists:`, typeof client.getPnLidEntry);
+
                 const result = await client.getPnLidEntry(phoneId);
+
+                console.log(`[ContactInfo] 🔍 getPnLidEntry result:`, JSON.stringify(result, null, 2));
 
                 if (result) {
                     // Extraer número de teléfono del resultado
@@ -363,7 +367,8 @@ async function getContactInfo(client, phoneId) {
                     }
                 }
             } catch (lidError) {
-                console.warn(`[ContactInfo] getPnLidEntry failed for ${phoneId}:`, lidError.message);
+                console.error(`[ContactInfo] ❌ getPnLidEntry failed for ${phoneId}:`, lidError.message);
+                console.error(`[ContactInfo] ❌ Full error:`, lidError);
             }
         }
 
@@ -387,8 +392,17 @@ async function getContactInfo(client, phoneId) {
 
         // Extraer número de teléfono si no lo obtuvimos antes
         if (!phoneNumber) {
-            const possibleNumbers = [
+            // Para LIDs, formattedName contiene el número real (ej: "+52 1 951 273 5199") 
+            // mientras que id.user contiene el identificador del LID
+            const possibleNumbers = isLID(phoneId) ? [
+                contact.formattedName,  // ← PRIORIDAD para LIDs: número real formateado
                 contact.number,
+                contact.id?.user,      // Para LIDs esto es el ID, no el número
+                contact.id?._serialized,
+                contact.id
+            ] : [
+                contact.number,         // Para contactos normales, priorizar number
+                contact.formattedName,
                 contact.id?.user,
                 contact.id?._serialized,
                 contact.id
@@ -396,9 +410,18 @@ async function getContactInfo(client, phoneId) {
 
             for (const num of possibleNumbers) {
                 if (num && typeof num === 'string') {
-                    const cleaned = num.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '').split(':')[0];
+                    // Limpiar el número: remover +, espacios, sufijos de WhatsApp
+                    const cleaned = num
+                        .replace(/\+/g, '')  // Remover +
+                        .replace(/\s/g, '')  // Remover espacios
+                        .replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '')
+                        .split(':')[0];
+
                     if (isValidPhoneNumber(cleaned)) {
                         phoneNumber = cleaned;
+                        const source = num === contact.formattedName ? 'formattedName' :
+                            num === contact.number ? 'contact.number' : 'id';
+                        console.log(`[ContactInfo] ✓ Found phone from ${source}: ${phoneNumber}`);
                         break;
                     }
                 }
