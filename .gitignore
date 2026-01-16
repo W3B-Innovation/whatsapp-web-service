@@ -22,3 +22,6 @@ logs/
 *.log
 *.md
 env.example.txt
+sessions.json
+tokens/
+.wpp_browser_data/
