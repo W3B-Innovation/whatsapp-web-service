@@ -277,11 +277,18 @@ async function getRealPhoneNumber(client, phoneId) {
                 const result = await client.getPnLidEntry(phoneId);
 
                 if (result && result.phoneNumber) {
-                    const cleaned = result.phoneNumber.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '');
+                    // phoneNumber puede ser un objeto con _serialized o id, o un string
+                    const phoneValue = typeof result.phoneNumber === 'string'
+                        ? result.phoneNumber
+                        : (result.phoneNumber._serialized || result.phoneNumber.id);
 
-                    if (isValidPhoneNumber(cleaned)) {
-                        console.log(`[PnLid] ✓ Found phone number via getPnLidEntry: ${cleaned} for LID: ${phoneId}`);
-                        return cleaned;
+                    if (phoneValue && typeof phoneValue === 'string') {
+                        const cleaned = phoneValue.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '');
+
+                        if (isValidPhoneNumber(cleaned)) {
+                            console.log(`[PnLid] ✓ Found phone number via getPnLidEntry: ${cleaned} for LID: ${phoneId}`);
+                            return cleaned;
+                        }
                     }
                 }
             } catch (lidError) {
@@ -354,10 +361,17 @@ async function getContactInfo(client, phoneId) {
                 if (result) {
                     // Extraer número de teléfono del resultado
                     if (result.phoneNumber) {
-                        const cleaned = result.phoneNumber.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '');
-                        if (isValidPhoneNumber(cleaned)) {
-                            phoneNumber = cleaned;
-                            console.log(`[ContactInfo] ✓ Phone from getPnLidEntry: ${phoneNumber}`);
+                        // phoneNumber puede ser un objeto con _serialized o id, o un string
+                        const phoneValue = typeof result.phoneNumber === 'string'
+                            ? result.phoneNumber
+                            : (result.phoneNumber._serialized || result.phoneNumber.id);
+
+                        if (phoneValue && typeof phoneValue === 'string') {
+                            const cleaned = phoneValue.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '');
+                            if (isValidPhoneNumber(cleaned)) {
+                                phoneNumber = cleaned;
+                                console.log(`[ContactInfo] ✓ Phone from getPnLidEntry: ${phoneNumber}`);
+                            }
                         }
                     }
 
@@ -392,6 +406,13 @@ async function getContactInfo(client, phoneId) {
 
         // Extraer número de teléfono si no lo obtuvimos antes
         if (!phoneNumber) {
+            // DEBUG: Mostrar todos los campos disponibles
+            console.log(`[ContactInfo] 🔍 DEBUG for ${phoneId}:`);
+            console.log(`  - contact.formattedName: "${contact.formattedName}"`);
+            console.log(`  - contact.number: "${contact.number}"`);
+            console.log(`  - contact.id?.user: "${contact.id?.user}"`);
+            console.log(`  - contact.id?._serialized: "${contact.id?._serialized}"`);
+
             // Para LIDs, formattedName contiene el número real (ej: "+52 1 951 273 5199") 
             // mientras que id.user contiene el identificador del LID
             const possibleNumbers = isLID(phoneId) ? [
@@ -416,6 +437,8 @@ async function getContactInfo(client, phoneId) {
                         .replace(/\s/g, '')  // Remover espacios
                         .replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '')
                         .split(':')[0];
+
+                    console.log(`[ContactInfo] 🔍 Trying "${num}" → cleaned: "${cleaned}" → valid: ${isValidPhoneNumber(cleaned)}`);
 
                     if (isValidPhoneNumber(cleaned)) {
                         phoneNumber = cleaned;
