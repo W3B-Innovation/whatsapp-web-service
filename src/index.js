@@ -972,6 +972,9 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 // 8. CONSTRUIR PAYLOAD
                 const cleanPayload = (obj) => JSON.parse(JSON.stringify(obj));
 
+                const mimetypeMap = { image: 'image/jpeg', video: 'video/mp4', ptt: 'audio/ogg', audio: 'audio/ogg', sticker: 'image/webp', document: 'application/octet-stream' };
+                const mimetype = (message.mimetype || '').trim() || (mediaData && mimetypeMap[message.type]) || '';
+
                 const payload = cleanPayload({
                     session: sessionName,
                     message: {
@@ -989,7 +992,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                         groupName: groupName,
                         sender: message.sender || {},
                         mediaData: mediaData || null,
-                        mimetype: message.mimetype || ''
+                        mimetype: mimetype
                     }
                 });
 
