@@ -793,6 +793,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     return;
                 }
 
+
                 // 4. FILTRAR MENSAJES VACÍOS
                 if (message.type === 'chat' && !message.body) {
                     console.log(`[Filter] Skipping empty chat message`);
@@ -1027,56 +1028,62 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
         // ============================================================================
         // CALL HANDLER - DETECTAR LLAMADAS EN TIEMPO REAL
         // ============================================================================
-        client.onIncomingCall(async (call) => {
-            try {
-                console.log(`[Call] Incoming call detected:`, call);
+        if (typeof client.onIncomingCall === 'function') {
+            console.log(`[Call] onIncomingCall listener is available, registering...`);
+            client.onIncomingCall(async (call) => {
+                try {
+                    console.log(`[Call] Incoming call detected:`, JSON.stringify(call, null, 2));
 
-                // Extraer número de teléfono del caller
-                const phoneNumber = extractPhoneNumber({
-                    from: call.peerJid || call.peer,
-                    to: null,
-                    fromMe: false
-                });
+                    // Extraer número de teléfono del caller
+                    const phoneNumber = extractPhoneNumber({
+                        from: call.peerJid,
+                        to: null,
+                        fromMe: false
+                    });
 
-                if (!phoneNumber) {
-                    console.log(`[Call] Could not extract phone number from call`);
-                    return;
-                }
-
-                const contactName = await getContactName(client, call.peerJid || call.peer);
-                const isVideo = call.isVideo || false;
-                const isGroup = call.isGroup || false;
-
-                const payload = {
-                    session: sessionName,
-                    message: {
-                        id: call.id || `call_${Date.now()}`,
-                        from: call.peerJid || call.peer,
-                        to: '', // Las entrantes no tienen "to" explícito
-                        body: `${isVideo ? '📹' : '📞'} Llamada ${isVideo ? 'de video' : 'de voz'}`,
-                        type: 'call_log',
-                        fromMe: false,
-                        timestamp: Math.floor(Date.now() / 1000),
-                        phoneNumber: phoneNumber,
-                        contactName: contactName || phoneNumber,
-                        senderName: contactName || phoneNumber,
-                        isGroup: isGroup,
-                        groupName: null,
-                        callMetadata: {
-                            isVideo: isVideo,
-                            direction: 'inbound',
-                            duration: 0 // No disponible para llamadas no contestadas
-                        }
+                    if (!phoneNumber) {
+                        console.log(`[Call] Could not extract phone number from call`);
+                        return;
                     }
-                };
 
-                console.log(`[Call] Sending call event to webhook - Phone: ${phoneNumber}`);
-                sendWebhook(webhookUrl, 'on_message', payload);
+                    const contactName = await getContactName(client, call.peerJid);
+                    const isVideo = call.isVideo || false;
+                    const isGroup = call.isGroup || false;
 
-            } catch (error) {
-                console.error(`[Call] Error processing incoming call:`, error);
-            }
-        });
+                    const payload = {
+                        session: sessionName,
+                        message: {
+                            id: call.id || `call_${Date.now()}`,
+                            from: call.peerJid,
+                            to: '', // Las entrantes no tienen "to" explícito
+                            body: `${isVideo ? '📹' : '📞'} Llamada ${isVideo ? 'de video' : 'de voz'}`,
+                            type: 'call_log',
+                            fromMe: false,
+                            timestamp: call.offerTime || Math.floor(Date.now() / 1000),
+                            phoneNumber: phoneNumber,
+                            contactName: contactName || phoneNumber,
+                            senderName: contactName || phoneNumber,
+                            isGroup: isGroup,
+                            groupName: null,
+                            callMetadata: {
+                                isVideo: isVideo,
+                                direction: 'inbound',
+                                duration: 0 // No disponible para llamadas no contestadas
+                            }
+                        }
+                    };
+
+                    console.log(`[Call] Sending call event to webhook - Phone: ${phoneNumber}`);
+                    sendWebhook(webhookUrl, 'on_message', payload);
+
+                } catch (error) {
+                    console.error(`[Call] Error processing incoming call:`, error);
+                }
+            });
+        } else {
+            console.warn(`[Call] onIncomingCall is NOT available in this WPPConnect version. Only historical call_log messages will be processed.`);
+        }
+
 
         if (!responseSent) {
             const state = await client.getConnectionState();
