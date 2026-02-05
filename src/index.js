@@ -762,6 +762,100 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
         } catch (e) { console.error('Could not capture browser PID:', e); }
 
         // ============================================================================
+        // HOOK PARA DETECTAR LLAMADAS SALIENTES
+        // ============================================================================
+        try {
+            await client.page.evaluateOnNewDocument(() => {
+                // Este código se ejecuta en el contexto de la página de WhatsApp Web
+                setTimeout(() => {
+                    if (window.WPP && window.WPP.call && window.WPP.call.offer) {
+                        const originalOffer = window.WPP.call.offer;
+
+                        // Interceptar la función offer
+                        window.WPP.call.offer = function (to, options = {}) {
+                            console.log('[OUTGOING CALL DETECTED]', { to, options });
+
+                            // Disparar un evento personalizado
+                            window.dispatchEvent(new CustomEvent('outgoing-call', {
+                                detail: { to, isVideo: options.isVideo || false, timestamp: Date.now() }
+                            }));
+
+                            // Llamar a la función original
+                            return originalOffer.call(this, to, options);
+                        };
+
+                        console.log('[Call Hook] WPP.call.offer intercepted successfully');
+                    }
+                }, 5000); // Esperar 5s para que WPP esté disponible
+            });
+
+            // Escuchar los eventos personalizados desde la página
+            await client.page.exposeFunction('onOutgoingCall', async (callData) => {
+                try {
+                    console.log(`\n📤 ========== OUTGOING CALL DETECTED (via hook) ==========`);
+                    console.log('To:', callData.to);
+                    console.log('IsVideo:', callData.isVideo);
+
+                    // Extraer número de teléfono
+                    const phoneNumber = extractPhoneNumber({
+                        from: null,
+                        to: callData.to,
+                        fromMe: true
+                    });
+
+                    if (!phoneNumber) {
+                        console.log(`[Call Hook] Could not extract phone number`);
+                        return;
+                    }
+
+                    const contactName = await getContactName(client, callData.to);
+
+                    const payload = {
+                        session: sessionName,
+                        message: {
+                            id: `call_out_${callData.timestamp}`,
+                            from: '',
+                            to: callData.to,
+                            body: `${callData.isVideo ? '📹' : '📞'} Llamada ${callData.isVideo ? 'de video' : 'de voz'}`,
+                            type: 'call_log',
+                            fromMe: true,
+                            timestamp: Math.floor(callData.timestamp / 1000),
+                            phoneNumber: phoneNumber,
+                            contactName: contactName || phoneNumber,
+                            senderName: 'Tú',
+                            isGroup: false,
+                            groupName: null,
+                            callMetadata: {
+                                isVideo: callData.isVideo,
+                                direction: 'outbound',
+                                duration: 0
+                            }
+                        }
+                    };
+
+                    console.log(`[Call Hook] Sending OUTGOING call to webhook - Phone: ${phoneNumber}`);
+                    sendWebhook(webhookUrl, 'on_message', payload);
+
+                } catch (error) {
+                    console.error(`[Call Hook] Error processing outgoing call:`, error);
+                }
+            });
+
+            // Inyectar listener en la página
+            await client.page.evaluate(() => {
+                window.addEventListener('outgoing-call', (event) => {
+                    window.onOutgoingCall(event.detail);
+                });
+            });
+
+            console.log('[Call Hook] Outgoing call detection hook installed');
+
+        } catch (hookError) {
+            console.error('[Call Hook] Failed to install outgoing call hook:', hookError);
+        }
+
+
+        // ============================================================================
         // MENSAJE HANDLER - MEJORADO CON FILTROS
         // ============================================================================
         client.onAnyMessage(async (message) => {
@@ -789,9 +883,18 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 // 3. VALIDAR TIPO DE MENSAJE
                 const validTypes = ['chat', 'image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location', 'multi_vcard', 'call_log'];
                 if (!validTypes.includes(message.type)) {
+                    // 🔍 TEMPORAL: Log para detectar si hay tipos de mensaje relacionados con llamadas
+                    if (message.type && (message.type.includes('call') || message.body?.includes('Llamada') || message.body?.includes('Call'))) {
+                        console.log(`⚠️ [CALL DEBUG] Found non-standard call-related message:`);
+                        console.log(`   Type: ${message.type}`);
+                        console.log(`   Body: ${message.body}`);
+                        console.log(`   FromMe: ${message.fromMe}`);
+                        console.log(`   Full message:`, JSON.stringify(message, null, 2));
+                    }
                     console.log(`[Filter] Skipping invalid message type: ${message.type}`);
                     return;
                 }
+
 
 
                 // 4. FILTRAR MENSAJES VACÍOS
@@ -952,7 +1055,8 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                         rawBody: callData
                     };
 
-                    console.log(`[Call] Detected call_log - isVideo: ${isVideo}, isMissed: ${isMissed}`);
+
+                    console.log(`[Call] Detected call_log - Direction: ${message.fromMe ? 'OUTBOUND' : 'INBOUND'}, isVideo: ${isVideo}, isMissed: ${isMissed}, Body: "${callData}"`);
                 }
 
                 const mediaTypes = ['image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location'];
@@ -1017,8 +1121,23 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     }
                 });
 
-                console.log(`[Webhook] Sending message to webhook - Phone: ${phoneNumber}, IsGroup: ${isGroup}, Group: ${groupName || 'N/A'}`);
+
+                // Log especial para llamadas
+                if (message.type === 'call_log' && callMetadata) {
+                    console.log(`\n📞 ========== SENDING CALL TO WEBHOOK ==========`);
+                    console.log(`Direction: ${callMetadata.direction === 'outbound' ? '📤 OUTBOUND (SALIENTE)' : '📥 INBOUND (ENTRANTE)'}`);
+                    console.log(`Type: ${callMetadata.isVideo ? 'VIDEO' : 'VOICE'}`);
+                    console.log(`Missed: ${callMetadata.isMissed}`);
+                    console.log(`Phone: ${phoneNumber}`);
+                    console.log(`FromMe: ${message.fromMe}`);
+                    console.log(`Payload.message.fromMe: ${payload.message.fromMe}`);
+                    console.log(`===============================================\n`);
+                } else {
+                    console.log(`[Webhook] Sending message to webhook - Phone: ${phoneNumber}, IsGroup: ${isGroup}, Group: ${groupName || 'N/A'}`);
+                }
+
                 sendWebhook(webhookUrl, 'on_message', payload);
+
 
             } catch (error) {
                 console.error(`[Error] Processing message ${message.id}:`, error);
@@ -1032,6 +1151,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
             console.log(`[Call] onIncomingCall listener is available, registering...`);
             client.onIncomingCall(async (call) => {
                 try {
+                    console.log(`\n🔔 ========== onIncomingCall TRIGGERED ==========`);
                     console.log(`[Call] Incoming call detected:`, JSON.stringify(call, null, 2));
 
                     // Extraer número de teléfono del caller
