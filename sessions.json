@@ -1,8 +1,1 @@
-{
-  "oscarprueba": {
-    "webhookUrl": "http://localhost:3000/api/whatsapp/web-sync/webhook"
-  },
-  "oscarprueba2": {
-    "webhookUrl": "http://localhost:3000/api/whatsapp/web-sync/webhook"
-  }
-}
+{}
