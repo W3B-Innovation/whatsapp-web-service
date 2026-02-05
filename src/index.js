@@ -1049,32 +1049,35 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     const contactName = await getContactName(client, call.peerJid);
                     const isVideo = call.isVideo || false;
                     const isGroup = call.isGroup || false;
+                    const isOutgoing = call.outgoing || false; // true = llamada saliente, false = entrante
 
                     const payload = {
                         session: sessionName,
                         message: {
                             id: call.id || `call_${Date.now()}`,
-                            from: call.peerJid,
-                            to: '', // Las entrantes no tienen "to" explícito
+                            from: isOutgoing ? '' : call.peerJid,
+                            to: isOutgoing ? call.peerJid : '',
                             body: `${isVideo ? '📹' : '📞'} Llamada ${isVideo ? 'de video' : 'de voz'}`,
                             type: 'call_log',
-                            fromMe: false,
+                            fromMe: isOutgoing,
                             timestamp: call.offerTime || Math.floor(Date.now() / 1000),
                             phoneNumber: phoneNumber,
                             contactName: contactName || phoneNumber,
-                            senderName: contactName || phoneNumber,
+                            senderName: isOutgoing ? 'Tú' : (contactName || phoneNumber),
                             isGroup: isGroup,
                             groupName: null,
                             callMetadata: {
                                 isVideo: isVideo,
-                                direction: 'inbound',
+                                direction: isOutgoing ? 'outbound' : 'inbound',
                                 duration: 0 // No disponible para llamadas no contestadas
                             }
                         }
                     };
 
-                    console.log(`[Call] Sending call event to webhook - Phone: ${phoneNumber}`);
+
+                    console.log(`[Call] Sending ${isOutgoing ? 'OUTGOING' : 'INCOMING'} call event to webhook - Phone: ${phoneNumber}, Type: ${isVideo ? 'VIDEO' : 'VOICE'}`);
                     sendWebhook(webhookUrl, 'on_message', payload);
+
 
                 } catch (error) {
                     console.error(`[Call] Error processing incoming call:`, error);
