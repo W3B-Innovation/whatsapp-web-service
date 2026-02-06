@@ -189,14 +189,14 @@ function extractPhoneNumber(message) {
     // 1. Determinar el ID base (from/to)
     phoneId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
 
-    // 2. Si es 1-to-1 y el phoneId es un LID, intentar obtener el número real de propiedades del mensaje
-    // WPPConnect a veces pone el número real en author, participant o sender.id incluso para LIDs
+    // 2. Si es un mensaje ENTRANTE 1-to-1 y el phoneId es un LID, intentar obtener el número real
+    // Solo lo hacemos para mensajes entrantes porque en los salientes el "author" somos nosotros mismos
     const isGroup = (phoneId && phoneId.includes('@g.us')) || (message.chat && message.chat.isGroup);
 
-    if (!isGroup) {
+    if (!isGroup && !message.fromMe) {
         const possibleRealId = message.author || message.participant || (message.sender && message.sender.id) || (message.id && message.id.participant);
-        if (possibleRealId && !isLID(possibleRealId)) {
-            console.log(`[LID] Resolved real number from message property: ${possibleRealId}`);
+        if (possibleRealId && isLID(phoneId) && !isLID(possibleRealId)) {
+            console.log(`[LID] Resolved real number from message property for incoming message: ${possibleRealId}`);
             phoneId = possibleRealId;
         }
     }
