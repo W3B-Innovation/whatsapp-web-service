@@ -139,7 +139,15 @@ function isStatusMessage(message) {
  * Los LIDs tienen formato: 86299532898535:22@lid o similar
  */
 function isLID(phoneId) {
-    return phoneId && (phoneId.includes('@lid') || phoneId.includes(':'));
+    if (!phoneId || typeof phoneId !== 'string') return false;
+    if (phoneId.includes('@lid') || phoneId.includes(':')) return true;
+
+    // IDs numéricos de 14 o más dígitos suelen ser LIDs (o IDs internos)
+    // Los números de teléfono reales raramente superan los 13 dígitos
+    const clean = phoneId.replace(/@.*$/g, '');
+    if (clean.length >= 14 && /^\d+$/.test(clean)) return true;
+
+    return false;
 }
 
 /**
@@ -178,14 +186,19 @@ function extractPhoneFromLID(lidString) {
 function extractPhoneNumber(message) {
     let phoneId = null;
 
-    // Determinar el ID correcto según la dirección del mensaje
-    if (message.fromMe) {
-        // Mensaje saliente: usar 'to' (generalmente el ID del chat/grupo/usuario destino)
-        // OJO: message.to es el destinatario real. message.chatId a veces es el LID del usuario propio si lo manda desde otro dispositivo.
-        phoneId = message.to || message.chatId;
-    } else {
-        // Mensaje entrante: usar 'from'
-        phoneId = message.from || message.chatId;
+    // 1. Determinar el ID base (from/to)
+    phoneId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
+
+    // 2. Si es un mensaje ENTRANTE 1-to-1 y el phoneId es un LID, intentar obtener el número real
+    // Solo lo hacemos para mensajes entrantes porque en los salientes el "author" somos nosotros mismos
+    const isGroup = (phoneId && phoneId.includes('@g.us')) || (message.chat && message.chat.isGroup);
+
+    if (!isGroup && !message.fromMe) {
+        const possibleRealId = message.author || message.participant || (message.sender && message.sender.id) || (message.id && message.id.participant);
+        if (possibleRealId && isLID(phoneId) && !isLID(possibleRealId)) {
+            console.log(`[LID] Resolved real number from message property for incoming message: ${possibleRealId}`);
+            phoneId = possibleRealId;
+        }
     }
 
     if (!phoneId) return null;
@@ -213,15 +226,17 @@ function extractPhoneNumber(message) {
         return lidCleaned;
     }
 
-    // Limpiar el ID (Soporte para @lid que es el nuevo formato de ID privado)
-    // También @g.us y otros
-    const cleanPhone = phoneId.replace(/@c.us|@g.us|@s.whatsapp.net|@broadcast|@lid/g, '');
+    // Limpiar el ID
+    let cleanPhone = phoneId.replace(/@c.us|@g.us|@s.whatsapp.net|@broadcast|@lid/g, '');
+
+    // Normalización para México (521 -> 52)
+    if (cleanPhone.startsWith('521') && cleanPhone.length === 13) {
+        cleanPhone = '52' + cleanPhone.substring(3);
+    }
 
     // Validar
     if (!isValidPhoneNumber(cleanPhone)) {
-        // Si es un grupo, a veces el ID es largo y válido, intentemos confiar si tiene @g.us el original
         if (phoneId.includes('@g.us')) return cleanPhone;
-
         console.log(`[Filter] Invalid phone number: ${cleanPhone} from ${phoneId}`);
         return null;
     }
@@ -304,17 +319,32 @@ async function getRealPhoneNumber(client, phoneId) {
 
         if (contact) {
             // Intentar diferentes fuentes del número en orden de confiabilidad
-            const possibleNumbers = [
-                contact.number,           // Número directo si está disponible
-                contact.id?.user,         // El campo 'user' en el ID generalmente tiene el número
-                contact.id?._serialized,  // ID serializado completo
-                contact.id                // ID como string
+            // Para LIDs, formattedName suele contener el número real (ej: +52 1 951...)
+            const possibleNumbers = isLID(phoneId) ? [
+                contact.formattedName,
+                contact.number,
+                contact.id?.user,
+                contact.id?._serialized
+            ] : [
+                contact.number,
+                contact.formattedName,
+                contact.id?.user,
+                contact.id?._serialized
             ];
 
             for (const realNumber of possibleNumbers) {
                 if (realNumber && typeof realNumber === 'string') {
-                    // Limpiar y validar
-                    const cleaned = realNumber.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '').split(':')[0];
+                    // Limpiar y validar: remover +, espacios y sufijos
+                    let cleaned = realNumber
+                        .replace(/\+/g, '')
+                        .replace(/\s/g, '')
+                        .replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '')
+                        .split(':')[0];
+
+                    // Normalización para México (521 -> 52)
+                    if (cleaned.startsWith('521') && cleaned.length === 13) {
+                        cleaned = '52' + cleaned.substring(3);
+                    }
 
                     if (isValidPhoneNumber(cleaned)) {
                         console.log(`[RealPhone] ✓ Found real number: ${cleaned} for ID: ${phoneId}`);
@@ -441,11 +471,16 @@ async function getContactInfo(client, phoneId) {
             for (const num of possibleNumbers) {
                 if (num && typeof num === 'string') {
                     // Limpiar el número: remover +, espacios, sufijos de WhatsApp
-                    const cleaned = num
+                    let cleaned = num
                         .replace(/\+/g, '')  // Remover +
                         .replace(/\s/g, '')  // Remover espacios
                         .replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '')
                         .split(':')[0];
+
+                    // Normalización para México (521 -> 52)
+                    if (cleaned.startsWith('521') && cleaned.length === 13) {
+                        cleaned = '52' + cleaned.substring(3);
+                    }
 
                     console.log(`[ContactInfo] 🔍 Trying "${num}" → cleaned: "${cleaned}" → valid: ${isValidPhoneNumber(cleaned)}`);
 
@@ -795,6 +830,16 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
 
         sessionData.client = client;
 
+        // ============================================================================
+        // DEDUPLICACIÓN DE LLAMADAS (Tiempo Real y Sincronización)
+        // =============-===============================================================
+        const processedCallLogs = new Set();
+        const getCallKey = (phone, timestamp, isOutgoing) => {
+            // Normalizar timestamp y redondearlo a 10s para absorber diferencias
+            const ts = Math.floor(timestamp / 10) * 10;
+            return `${phone}_${ts}_${isOutgoing ? 'out' : 'in'}`;
+        };
+
         // Capture PID
         try {
             let browser = null;
@@ -809,6 +854,499 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 }
             }
         } catch (e) { console.error('Could not capture browser PID:', e); }
+
+        // Set custom User-Agent for device branding
+        try {
+            if (client.page && typeof client.page.setUserAgent === 'function') {
+                await client.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Bitend AI/1.0 Chrome/120.0.0.0 Safari/537.36');
+                console.log(`[UserAgent] Set custom User-Agent: "Bitend AI"`);
+            }
+        } catch (e) { console.error('Could not set User-Agent:', e); }
+
+
+
+        // ============================================================================
+        // DETECCIÓN DE LLAMADAS SALIENTES - NUEVA IMPLEMENTACIÓN
+        // ============================================================================
+        try {
+            console.log('[OutgoingCalls] 🚀 Starting outgoing call detection setup...');
+
+            // Obtener el número de WhatsApp de esta sesión
+            try {
+                const hostDevice = await client.getHostDevice();
+                if (hostDevice && hostDevice.id && hostDevice.id.user) {
+                    sessionData.myNumber = hostDevice.id.user;
+                    console.log(`[OutgoingCalls] 📱 Session number: ${sessionData.myNumber}`);
+                }
+            } catch (e) {
+                console.warn('[OutgoingCalls] Could not get session number:', e.message);
+            }
+
+            // Capturar logs de la consola del navegador para debugging
+            client.page.on('console', msg => {
+                const text = msg.text();
+                if (text.includes('[OutCall]') || text.includes('[WPP Call]')) {
+                    console.log(`[Browser] ${text}`);
+                }
+            });
+
+            // Exponer función para comunicación browser → Node.js
+            await client.page.exposeFunction('_notifyOutgoingCall', async (callData) => {
+                try {
+                    console.log(`\n📤 ========== LLAMADA SALIENTE DETECTADA ==========`);
+                    console.log(`   To: ${callData.to}`);
+                    console.log(`   IsVideo: ${callData.isVideo}`);
+                    console.log(`   Timestamp: ${callData.timestamp}`);
+                    console.log(`   Method: ${callData.detectionMethod}`);
+
+                    // Extraer número de teléfono (con resolución de LIDs)
+                    const phoneNumber = await getRealPhoneNumber(client, callData.to) || extractPhoneNumber({
+                        from: null,
+                        to: callData.to,
+                        fromMe: true
+                    });
+
+                    if (!phoneNumber) {
+                        console.log(`[OutgoingCalls] ⚠️  Could not extract phone number from ${callData.to}`);
+                        return;
+                    }
+
+                    // DEDUPLICACIÓN
+                    const callKey = getCallKey(phoneNumber, Math.floor(callData.timestamp / 1000), true);
+                    if (processedCallLogs.has(callKey)) {
+                        console.log(`[OutgoingCalls] ⏭️  Llamada duplicada detectada (key: ${callKey}), saltando...`);
+                        return;
+                    }
+                    processedCallLogs.add(callKey);
+
+                    // Obtener nombre del contacto
+                    const contactName = await getContactName(client, callData.to);
+
+                    // Crear payload para el webhook
+                    const payload = {
+                        session: sessionName,
+                        message: {
+                            id: `call_out_${callData.timestamp}`,
+                            from: sessionData.myNumber || '',
+                            to: callData.to,
+                            body: `${callData.isVideo ? '📹' : '📞'} Llamada ${callData.isVideo ? 'de video' : 'de voz'}`,
+                            type: 'call_log',
+                            fromMe: true,
+                            timestamp: Math.floor(callData.timestamp / 1000),
+                            phoneNumber: phoneNumber,
+                            contactName: contactName || phoneNumber,
+                            senderName: 'Tú',
+                            isGroup: false,
+                            groupName: null,
+                            callMetadata: {
+                                isVideo: callData.isVideo,
+                                direction: 'outbound',
+                                duration: callData.duration || 0,
+                                detectionMethod: callData.detectionMethod
+                            }
+                        }
+                    };
+
+                    console.log(`[OutgoingCalls] ✅ Sending to webhook - Contact: ${contactName || phoneNumber}`);
+                    await sendWebhook(webhookUrl, 'on_message', payload);
+
+                } catch (error) {
+                    console.error(`[OutgoingCalls] ❌ Error processing outgoing call:`, error);
+                }
+            });
+
+            // Esperar a que la página esté completamente cargada y WPP disponible
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            // Instalar hooks en el navegador (ejecutar después de que WPP esté cargado)
+            const hookResult = await client.page.evaluate(() => {
+                return new Promise((resolve) => {
+                    const installHooks = () => {
+                        console.log('[OutCall] 🔍 Checking WPP availability...');
+
+                        if (!window.WPP) {
+                            console.log('[OutCall] ❌ WPP not available yet, retrying...');
+                            return false;
+                        }
+
+                        console.log('[OutCall] ✅ WPP is available');
+                        console.log('[OutCall] 🔍 WPP.call exists:', !!window.WPP?.call);
+                        console.log('[OutCall] 🔍 WPP.ev exists:', !!window.WPP?.ev);
+                        console.log('[OutCall] 🔍 WPP.whatsapp.CallModel exists:', !!window.WPP?.whatsapp?.CallModel);
+
+                        // EXPLORACIÓN: Ver qué métodos están disponibles
+                        try {
+                            console.log('[OutCall] 🔍 === EXPLORING WPP.call ===');
+                            if (window.WPP?.call) {
+                                const callMethods = Object.keys(window.WPP.call);
+                                console.log('[OutCall] 🔍 Available methods in WPP.call:', callMethods);
+                            }
+
+                            console.log('[OutCall] 🔍 === EXPLORING Store/WPP.whatsapp.Call ===');
+                            const Store = window.Store || window.WPP?.whatsapp;
+                            if (Store?.Call) {
+                                console.log('[OutCall] 🔍 Store.Call exists, methods:', Object.keys(Store.Call).filter(k => typeof Store.Call[k] === 'function'));
+                            }
+
+                            console.log('[OutCall] 🔍 === EXPLORING WPP.ev call events ===');
+                            if (window.WPP?.ev) {
+                                // Listar todos los listeners registrados
+                                console.log('[OutCall] 🔍 WPP.ev listenerCount for "call.**":', window.WPP.ev.listenerCount?.('call.**'));
+                            }
+                        } catch (explorationError) {
+                            console.log('[OutCall] ⚠️  Exploration error:', explorationError.message);
+                        }
+
+                        const results = {
+                            wppAvailable: true,
+                            strategies: []
+                        };
+
+                        // ESTRATEGIA 1: Interceptar WPP.call.offer
+                        if (window.WPP?.call?.offer) {
+                            try {
+                                const originalOffer = window.WPP.call.offer;
+
+                                window.WPP.call.offer = async function (to, options = {}) {
+                                    console.log('[OutCall] 📞 WPP.call.offer intercepted!', { to, options });
+
+                                    // Notificar a Node.js
+                                    if (window._notifyOutgoingCall) {
+                                        window._notifyOutgoingCall({
+                                            to: typeof to === 'string' ? to : to._serialized || to.toString(),
+                                            isVideo: options.isVideo || false,
+                                            timestamp: Date.now(),
+                                            detectionMethod: 'offer_intercept'
+                                        });
+                                    }
+
+                                    // Llamar a la función original
+                                    return originalOffer.call(this, to, options);
+                                };
+
+                                results.strategies.push('offer_intercept');
+                                console.log('[OutCall] ✅ Offer intercept installed');
+                            } catch (e) {
+                                console.log('[OutCall] ⚠️  Offer intercept failed:', e.message);
+                            }
+                        }
+
+                        // ESTRATEGIA 2: Escuchar eventos de WPP.ev
+                        if (window.WPP?.ev) {
+                            try {
+                                // Escuchar todos los eventos de call
+                                window.WPP.ev.on('call.active_call', (call) => {
+                                    console.log('[OutCall] 🎯 call.active_call event:', call);
+
+                                    if (call?.peerJid && call?.isOutgoing !== false) {
+                                        // Intentar obtener participante real si existe (para LIDs)
+                                        const realJid = call.author || call.participant || (call.peerJid?._serialized || call.peerJid);
+
+                                        window._notifyOutgoingCall({
+                                            to: realJid,
+                                            peerJid: call.peerJid?._serialized || call.peerJid,
+                                            isVideo: call.isVideo || call.offerType === 'video',
+                                            timestamp: Date.now(),
+                                            detectionMethod: 'active_call_event'
+                                        });
+                                    }
+                                });
+
+                                // Evento alternativo
+                                window.WPP.ev.on('call.send_call_offer', (data) => {
+                                    console.log('[OutCall] 🎯 call.send_call_offer event:', data);
+
+                                    if (data?.to || data?.peer) {
+                                        const recipient = data.to || data.peer;
+                                        window._notifyOutgoingCall({
+                                            to: recipient._serialized || recipient,
+                                            isVideo: data.isVideo || data.offerType === 'video',
+                                            timestamp: Date.now(),
+                                            detectionMethod: 'send_offer_event'
+                                        });
+                                    }
+                                });
+
+                                results.strategies.push('ev_listeners');
+                                console.log('[OutCall] ✅ WPP.ev listeners installed');
+                            } catch (e) {
+                                console.log('[OutCall] ⚠️  WPP.ev listeners failed:', e.message);
+                            }
+                        }
+
+                        // ESTRATEGIA 3: Monitorear cambios en el Store de llamadas
+                        if (window.WPP?.whatsapp?.CallModel) {
+                            try {
+                                // Guardar referencia a las llamadas ya procesadas
+                                window._processedCalls = new Set();
+                                let debugCounter = 0;
+
+                                // Polling cada 2 segundos para verificar nuevas llamadas
+                                setInterval(() => {
+                                    try {
+                                        const Store = window.Store || window.WPP?.whatsapp;
+                                        const calls = Store?.Call?.getModelsArray?.() || [];
+
+                                        // Debug cada 30 segundos (cada 15 iteraciones)
+                                        debugCounter++;
+                                        if (debugCounter % 15 === 0) {
+                                            console.log(`[OutCall] 🔍 Debug: Found ${calls.length} total calls in Store`);
+                                        }
+
+                                        calls.forEach(call => {
+                                            const callId = call.id || call._serialized || JSON.stringify(call.peerJid);
+
+                                            // Si es una llamada nueva, loggear sus propiedades para debugging
+                                            if (!window._processedCalls.has(callId)) {
+                                                console.log('[OutCall] 🔍 New call found:', {
+                                                    id: callId,
+                                                    peer: call.peerJid?._serialized || call.peerJid,
+                                                    isOutgoing: call.isOutgoing,
+                                                    isIncoming: call.isIncoming,
+                                                    state: call.state,
+                                                    fromMe: call.fromMe,
+                                                    isVideo: call.isVideo,
+                                                    canHandleLocally: call.canHandleLocally,
+                                                    offerTime: call.offerTime,
+                                                    timestamp: call.timestamp
+                                                });
+
+                                                window._processedCalls.add(callId);
+
+                                                // Detectar si es una llamada saliente (múltiples propiedades posibles)
+                                                const isOutgoingCall = call.isOutgoing === true ||
+                                                    call.fromMe === true ||
+                                                    call.state === 'OUTGOING_RING' ||
+                                                    call.canHandleLocally === true;
+
+                                                if (isOutgoingCall && call.peerJid) {
+                                                    console.log('[OutCall] 🎯 Outgoing call confirmed! Notifying...');
+
+                                                    window._notifyOutgoingCall({
+                                                        to: call.peerJid._serialized || call.peerJid,
+                                                        isVideo: call.isVideo || call.offerType === 'video',
+                                                        timestamp: call.offerTime || call.timestamp || Date.now(),
+                                                        detectionMethod: 'store_polling',
+                                                        duration: call.duration || 0
+                                                    });
+                                                }
+                                            }
+                                        });
+                                    } catch (e) {
+                                        console.log('[OutCall] ⚠️  Polling error:', e.message);
+                                    }
+                                }, 2000);
+
+                                results.strategies.push('store_polling');
+                                console.log('[OutCall] ✅ Store polling started');
+                            } catch (e) {
+                                console.log('[OutCall] ⚠️  Store polling failed:', e.message);
+                            }
+                        }
+
+                        return results;
+                    };
+
+                    // Intentar instalar hooks con reintentos
+                    let attempts = 0;
+                    const maxAttempts = 10;
+
+                    const tryInstall = () => {
+                        attempts++;
+                        const result = installHooks();
+
+                        if (result) {
+                            resolve(result);
+                        } else if (attempts < maxAttempts) {
+                            setTimeout(tryInstall, 1000);
+                        } else {
+                            resolve({ wppAvailable: false, strategies: [], error: 'Max attempts reached' });
+                        }
+                    };
+
+                    tryInstall();
+                });
+            });
+
+            if (hookResult.wppAvailable) {
+                console.log(`[OutgoingCalls] ✅ Detection installed with ${hookResult.strategies.length} strategies:`);
+                hookResult.strategies.forEach(s => console.log(`   - ${s}`));
+            } else {
+                console.error('[OutgoingCalls] ❌ Failed to install detection:', hookResult.error);
+            }
+
+        } catch (hookError) {
+            console.error('[OutgoingCalls] ❌ Setup failed:', hookError);
+        }
+
+        // ============================================================================
+        // SINCRONIZACIÓN DE HISTORIAL DE LLAMADAS (para llamadas desde móvil)
+        // ============================================================================
+        const SYNC_INTERVAL = 10000; // 10 segundos
+        const MESSAGES_TO_CHECK = 10; // Revisar últimos 10 mensajes por chat
+
+        const syncCallLogsFromHistory = async () => {
+            try {
+                // Obtener todos los chats
+                const allChats = await client.listChats();
+
+                // Filtrar solo chats individuales (no grupos)
+                const individualChats = allChats.filter(chat => !chat.isGroup);
+
+                // Ordenar por actividad reciente y tomar los más recientes
+                const recentChats = individualChats
+                    .filter(chat => chat.id)
+                    .sort((a, b) => {
+                        const timeA = a.lastMessage?.t || a.t || 0;
+                        const timeB = b.lastMessage?.t || b.t || 0;
+                        return timeB - timeA;
+                    })
+                    .slice(0, 50); // Top 50 chats para asegurar cobertura
+
+                let callsFound = 0;
+                let newCallsProcessed = 0;
+                let chatsChecked = 0;
+
+                console.log(`[CallSync] 🔍 Checking ${recentChats.length} recent chats for call_log messages...`);
+
+                for (const chat of recentChats) {
+                    try {
+                        chatsChecked++;
+
+                        // Obtener últimos mensajes del chat
+                        const messages = await client.getMessages(chat.id._serialized, { count: MESSAGES_TO_CHECK });
+
+                        // DEBUG: Mostrar tipos de mensajes encontrados
+                        const messageTypes = messages.map(m => m.type).join(', ');
+                        if (chatsChecked <= 3) { // Solo mostrar para los primeros 3 chats
+                            console.log(`[CallSync] 🔍 Chat ${chat.id._serialized}: ${messages.length} messages, types: [${messageTypes}]`);
+                        }
+
+                        for (const msg of messages) {
+                            // Solo procesar call_log
+                            if (msg.type !== 'call_log') continue;
+
+                            callsFound++;
+
+                            // Definir ID de mensaje (msg.id o msg.id._serialized)
+                            const callId = msg.id._serialized || msg.id;
+
+                            // Extraer información de la llamada (con resolución de LIDs)
+                            const targetId = msg.fromMe ? (msg.to || msg.chatId) : (msg.from || msg.chatId);
+                            const phoneNumber = await getRealPhoneNumber(client, targetId) || extractPhoneNumber(msg);
+
+                            if (!phoneNumber) {
+                                console.log(`[CallSync] ⚠️  Could not extract phone number`);
+                                continue;
+                            }
+
+                            // DEDUPLICACIÓN (Usar key compuesta además de ID)
+                            const isOutgoing = msg.fromMe;
+                            const callKey = getCallKey(phoneNumber, msg.timestamp, isOutgoing);
+
+                            if (processedCallLogs.has(callId) || processedCallLogs.has(callKey)) {
+                                if (!processedCallLogs.has(callId)) processedCallLogs.add(callId);
+                                if (!processedCallLogs.has(callKey)) processedCallLogs.add(callKey);
+                                continue; // Ya procesado
+                            }
+
+                            // Marcar como procesado
+                            if (callId) processedCallLogs.add(callId);
+                            processedCallLogs.add(callKey);
+                            newCallsProcessed++;
+
+                            console.log(`\n📞 [CallSync] ========== LLAMADA ${isOutgoing ? 'SALIENTE' : 'ENTRANTE'} ENCONTRADA EN HISTORIAL ==========`);
+                            console.log(`   Chat: ${chat.id._serialized}`);
+                            console.log(`   Call ID: ${callId}`);
+                            console.log(`   Body: ${msg.body}`);
+                            console.log(`   Timestamp: ${msg.timestamp}`);
+
+
+                            const contactName = await getContactName(client, chat.id._serialized);
+
+                            // Determinar si es video según el body del mensaje
+                            const bodyText = (msg.body || '').toLowerCase();
+                            const isVideo = bodyText.includes('video') || bodyText.includes('videollamada');
+                            const isMissed = !isOutgoing && (bodyText.includes('missed') || bodyText.includes('perdida'));
+
+                            // Generar un body descriptivo
+                            let callDescription;
+                            if (isOutgoing) {
+                                callDescription = isVideo ? 'Videollamada saliente' : 'Llamada de voz saliente';
+                            } else {
+                                callDescription = isVideo ? 'Videollamada entrante' : 'Llamada de voz entrante';
+                                if (isMissed) callDescription += ' (perdida)';
+                            }
+
+                            const displayBody = msg.body || callDescription;
+
+                            // Crear payload para webhook
+                            const payload = {
+                                session: sessionName,
+                                message: {
+                                    id: callId,
+                                    from: isOutgoing ? (sessionData.myNumber || '') : chat.id._serialized,
+                                    to: isOutgoing ? chat.id._serialized : (sessionData.myNumber || ''),
+                                    body: `${isVideo ? '📹' : '📞'} ${displayBody}`,
+                                    type: 'call_log',
+                                    fromMe: isOutgoing,
+                                    timestamp: msg.timestamp,
+                                    phoneNumber: phoneNumber,
+                                    contactName: contactName || phoneNumber,
+                                    senderName: isOutgoing ? 'Tú' : (contactName || phoneNumber),
+                                    isGroup: false,
+                                    groupName: null,
+                                    callMetadata: {
+                                        isVideo: isVideo,
+                                        isMissed: isMissed,
+                                        direction: isOutgoing ? 'outbound' : 'inbound',
+                                        duration: 0,
+                                        detectionMethod: 'history_sync',
+                                        syncedFromMobile: true
+                                    }
+                                }
+                            };
+
+                            console.log(`[CallSync] ✅ Enviando al CRM - Contacto: ${contactName || phoneNumber}`);
+                            await sendWebhook(webhookUrl, 'on_message', payload);
+                            console.log(`================================================\n`);
+                        }
+                    } catch (chatError) {
+                        // Silenciar errores de chats individuales
+                        if (chatError.message && !chatError.message.includes('evaluate')) {
+                            console.warn(`[CallSync] ⚠️  Error processing chat ${chat.id._serialized}:`, chatError.message);
+                        }
+                    }
+                }
+
+                if (newCallsProcessed > 0) {
+                    console.log(`[CallSync] 📊 Sync complete: ${newCallsProcessed} new calls processed (${callsFound} total found in history)`);
+                } else if (callsFound > 0) {
+                    console.log(`[CallSync] 📊 Found ${callsFound} call_log messages (all already processed)`);
+                }
+
+                // Limpiar cache si crece mucho (mantener últimos 500)
+                if (processedCallLogs.size > 500) {
+                    const toKeep = Array.from(processedCallLogs).slice(-500);
+                    processedCallLogs.clear();
+                    toKeep.forEach(id => processedCallLogs.add(id));
+                }
+
+            } catch (syncError) {
+                console.error(`[CallSync] ❌ Sync error:`, syncError.message);
+            }
+        };
+
+        // Iniciar sincronización periódica
+        console.log(`[CallSync] 🔄 Starting call history sync (every ${SYNC_INTERVAL / 1000}s, checking last ${MESSAGES_TO_CHECK} messages per chat)`);
+
+        // Primera sincronización después de 5 segundos
+        setTimeout(() => {
+            syncCallLogsFromHistory();
+            // Luego cada SYNC_INTERVAL
+            setInterval(syncCallLogsFromHistory, SYNC_INTERVAL);
+        }, 5000);
+
 
         // ============================================================================
         // MENSAJE HANDLER - MEJORADO CON FILTROS
@@ -836,11 +1374,21 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 }
 
                 // 3. VALIDAR TIPO DE MENSAJE
-                const validTypes = ['chat', 'image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location', 'multi_vcard'];
+                const validTypes = ['chat', 'image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location', 'multi_vcard', 'call_log'];
                 if (!validTypes.includes(message.type)) {
+                    // 🔍 TEMPORAL: Log para detectar si hay tipos de mensaje relacionados con llamadas
+                    if (message.type && (message.type.includes('call') || message.body?.includes('Llamada') || message.body?.includes('Call'))) {
+                        console.log(`⚠️ [CALL DEBUG] Found non-standard call-related message:`);
+                        console.log(`   Type: ${message.type}`);
+                        console.log(`   Body: ${message.body}`);
+                        console.log(`   FromMe: ${message.fromMe}`);
+                        console.log(`   Full message:`, JSON.stringify(message, null, 2));
+                    }
                     console.log(`[Filter] Skipping invalid message type: ${message.type}`);
                     return;
                 }
+
+
 
                 // 4. FILTRAR MENSAJES VACÍOS
                 if (message.type === 'chat' && !message.body) {
@@ -848,27 +1396,42 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     return;
                 }
 
-                // 5. EXTRAER NÚMERO DE TELÉFONO VÁLIDO
-                let phoneNumber = extractPhoneNumber(message);
-                if (!phoneNumber) {
-                    console.log(`[Filter] Could not extract valid phone number from message`);
-                    return;
+                // 5. DETERMINAR EL ID Y RESOLVER NÚMERO
+                const originalPhoneId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
+                let phoneNumber = null;
+
+                // Si es un LID o ID sospechoso, intentar resolver número real primero
+                if (originalPhoneId && isLID(originalPhoneId)) {
+                    console.log(`[LID] Resolving real number for: ${originalPhoneId}`);
+                    phoneNumber = await getRealPhoneNumber(client, originalPhoneId);
                 }
 
-                // 5.5 MEJORA: Si detectamos un LID, intentar obtener el número real
-                const originalPhoneId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
-                if (originalPhoneId && isLID(originalPhoneId)) {
-                    console.log(`[LID] Attempting to get real phone number for LID: ${originalPhoneId}`);
-                    const realPhone = await getRealPhoneNumber(client, originalPhoneId);
-                    if (realPhone && realPhone !== phoneNumber) {
-                        console.log(`[LID] Replaced LID-based phone ${phoneNumber} with real phone: ${realPhone}`);
-                        phoneNumber = realPhone;
-                    }
+                // Fallback a extracción normal si no se resolvió o no es LID
+                if (!phoneNumber) {
+                    phoneNumber = extractPhoneNumber(message);
+                }
+
+                if (!phoneNumber) {
+                    console.log(`[Filter] Could not determine valid phone number for message from ${originalPhoneId}`);
+                    return;
                 }
 
                 console.log(`[Valid] Processing message from phone: ${phoneNumber}`);
                 console.log(`[Debug] Message body:`, message.body);
                 console.log(`[Debug] Message has mentionedIds:`, message.mentionedIds || 'None');
+
+                // 📞 LOGGING ESPECIAL PARA CALL_LOG
+                if (message.type === 'call_log') {
+                    console.log(`\n📞 ========== CALL_LOG MESSAGE DETECTED ==========`);
+                    console.log(`   From: ${message.from}`);
+                    console.log(`   To: ${message.to}`);
+                    console.log(`   FromMe: ${message.fromMe}`);
+                    console.log(`   Body: ${message.body}`);
+                    console.log(`   Phone: ${phoneNumber}`);
+                    console.log(`   Timestamp: ${ts}`);
+                    console.log(`   Full message keys:`, Object.keys(message));
+                    console.log(`================================================\n`);
+                }
 
                 // Procesar menciones - Intentar de dos formas:
                 // 1. Usando mentionedIds si está disponible
@@ -980,9 +1543,29 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     console.log(`[Individual] Message ${message.fromMe ? 'TO' : 'FROM'} contact: ${contactName}, sender: ${senderName} (ID: ${targetId})`);
                 }
 
-                // 7. PROCESAR MEDIA
+                // 7. PROCESAR MEDIA Y LLAMADAS
                 let cleanBody = message.body;
                 let mediaData = null;
+                let callMetadata = null;
+
+                // Procesar llamadas (call_log)
+                if (message.type === 'call_log') {
+                    const callData = message.body || '';
+                    const isVideo = callData.includes('video') || callData.includes('Video') || callData.includes('vídeo');
+                    const isMissed = callData.includes('Missed') || callData.includes('perdida') || callData.includes('Perdida');
+
+                    cleanBody = `${isVideo ? '📹' : '📞'} Llamada ${isVideo ? 'de video' : 'de voz'}${isMissed ? ' (perdida)' : ''}`;
+
+                    callMetadata = {
+                        isVideo: isVideo,
+                        isMissed: isMissed,
+                        direction: message.fromMe ? 'outbound' : 'inbound',
+                        rawBody: callData
+                    };
+
+
+                    console.log(`[Call] Detected call_log - Direction: ${message.fromMe ? 'OUTBOUND' : 'INBOUND'}, isVideo: ${isVideo}, isMissed: ${isMissed}, Body: "${callData}"`);
+                }
 
                 const mediaTypes = ['image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location'];
 
@@ -1041,12 +1624,28 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                         groupName: groupName,
                         sender: message.sender || {},
                         mediaData: mediaData || null,
-                        mimetype: mimetype
+                        mimetype: message.mimetype || '',
+                        callMetadata: callMetadata || null
                     }
                 });
 
-                console.log(`[Webhook] Sending message to webhook - Phone: ${phoneNumber}, IsGroup: ${isGroup}, Group: ${groupName || 'N/A'}`);
+
+                // Log especial para llamadas
+                if (message.type === 'call_log' && callMetadata) {
+                    console.log(`\n📞 ========== SENDING CALL TO WEBHOOK ==========`);
+                    console.log(`Direction: ${callMetadata.direction === 'outbound' ? '📤 OUTBOUND (SALIENTE)' : '📥 INBOUND (ENTRANTE)'}`);
+                    console.log(`Type: ${callMetadata.isVideo ? 'VIDEO' : 'VOICE'}`);
+                    console.log(`Missed: ${callMetadata.isMissed}`);
+                    console.log(`Phone: ${phoneNumber}`);
+                    console.log(`FromMe: ${message.fromMe}`);
+                    console.log(`Payload.message.fromMe: ${payload.message.fromMe}`);
+                    console.log(`===============================================\n`);
+                } else {
+                    console.log(`[Webhook] Sending message to webhook - Phone: ${phoneNumber}, IsGroup: ${isGroup}, Group: ${groupName || 'N/A'}`);
+                }
+
                 sendWebhook(webhookUrl, 'on_message', payload);
+
 
             } catch (error) {
                 console.error(`[Error] Processing message ${message.id}:`, error);
@@ -1058,6 +1657,90 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 }
             }
         });
+
+        // ============================================================================
+        // CALL HANDLER - DETECTAR LLAMADAS EN TIEMPO REAL
+        // ============================================================================
+        if (typeof client.onIncomingCall === 'function') {
+            console.log(`[Call] onIncomingCall listener is available, registering...`);
+            client.onIncomingCall(async (call) => {
+                try {
+                    console.log(`\n🔔 ========== onIncomingCall TRIGGERED ==========`);
+                    console.log(`[Call] Incoming call detected:`, JSON.stringify(call, null, 2));
+
+                    // Extraer número de teléfono del caller
+                    // 1. Intentar de propiedades del objeto call (como author o id.participant)
+                    let peerId = call.peerJid;
+                    let possibleRealId = call.author || call.participant || (call.id && call.id.participant);
+
+                    if (possibleRealId && isLID(peerId) && !isLID(possibleRealId)) {
+                        peerId = possibleRealId;
+                    }
+
+                    const phoneNumber = await getRealPhoneNumber(client, peerId) || extractPhoneNumber({
+                        from: peerId,
+                        to: null,
+                        fromMe: false,
+                        author: call.author,
+                        participant: call.participant,
+                        id: call.id
+                    });
+
+                    if (!phoneNumber) {
+                        console.log(`[Call] Could not extract phone number from call`);
+                        return;
+                    }
+
+                    const contactName = await getContactName(client, call.peerJid);
+                    const isVideo = call.isVideo || false;
+                    const isGroup = call.isGroup || false;
+                    const isOutgoing = call.outgoing || false; // true = llamada saliente, false = entrante
+                    const timestamp = call.offerTime || Math.floor(Date.now() / 1000);
+
+                    // DEDUPLICACIÓN
+                    const callKey = getCallKey(phoneNumber, timestamp, isOutgoing);
+                    if (processedCallLogs.has(callKey)) {
+                        console.log(`[Call] ⏭️  Llamada duplicada detectada (key: ${callKey}), saltando...`);
+                        return;
+                    }
+                    processedCallLogs.add(callKey);
+
+                    const payload = {
+                        session: sessionName,
+                        message: {
+                            id: call.id || `call_${Date.now()}`,
+                            from: isOutgoing ? '' : call.peerJid,
+                            to: isOutgoing ? call.peerJid : '',
+                            body: `${isVideo ? '📹' : '📞'} Llamada ${isVideo ? 'de video' : 'de voz'}`,
+                            type: 'call_log',
+                            fromMe: isOutgoing,
+                            timestamp: timestamp,
+                            phoneNumber: phoneNumber,
+                            contactName: contactName || phoneNumber,
+                            senderName: isOutgoing ? 'Tú' : (contactName || phoneNumber),
+                            isGroup: isGroup,
+                            groupName: null,
+                            callMetadata: {
+                                isVideo: isVideo,
+                                direction: isOutgoing ? 'outbound' : 'inbound',
+                                duration: 0 // No disponible para llamadas no contestadas
+                            }
+                        }
+                    };
+
+
+                    console.log(`[Call] Sending ${isOutgoing ? 'OUTGOING' : 'INCOMING'} call event to webhook - Phone: ${phoneNumber}, Type: ${isVideo ? 'VIDEO' : 'VOICE'}`);
+                    sendWebhook(webhookUrl, 'on_message', payload);
+
+
+                } catch (error) {
+                    console.error(`[Call] Error processing incoming call:`, error);
+                }
+            });
+        } else {
+            console.warn(`[Call] onIncomingCall is NOT available in this WPPConnect version. Only historical call_log messages will be processed.`);
+        }
+
 
         if (!responseSent) {
             const state = await client.getConnectionState();
