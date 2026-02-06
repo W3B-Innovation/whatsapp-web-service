@@ -1087,36 +1087,25 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
         // ============================================================================
         const processedCallLogs = new Set();
         const SYNC_INTERVAL = 10000; // 10 segundos
-        const MESSAGES_TO_CHECK = 5; // Revisar últimos 5 mensajes por chat
+        const MESSAGES_TO_CHECK = 10; // Revisar últimos 10 mensajes por chat
 
         const syncCallLogsFromHistory = async () => {
             try {
                 // Obtener todos los chats
                 const allChats = await client.listChats();
 
-                // DEBUG: Ver estructura de los chats
-                if (allChats.length > 0 && !syncCallLogsFromHistory._debugLogged) {
-                    const sampleChat = allChats[0];
-                    console.log(`[CallSync] 🔍 DEBUG: Sample chat structure:`, {
-                        id: sampleChat.id,
-                        isGroup: sampleChat.isGroup,
-                        hasLastMessage: !!sampleChat.lastMessage,
-                        lastMessageT: sampleChat.lastMessage?.t,
-                        lastMessageTimestamp: sampleChat.lastMessage?.timestamp,
-                        keys: Object.keys(sampleChat)
-                    });
-                    syncCallLogsFromHistory._debugLogged = true;
-                }
-
                 // Filtrar solo chats individuales (no grupos)
                 const individualChats = allChats.filter(chat => !chat.isGroup);
 
-                console.log(`[CallSync] 🔍 Found ${allChats.length} total chats, ${individualChats.length} individual chats`);
-
-                // Ordenar por actividad reciente y tomar los 20 más recientes
+                // Ordenar por actividad reciente y tomar los más recientes
                 const recentChats = individualChats
-                    .filter(chat => chat.id) // Solo con ID válido
-                    .slice(0, 30); // Top 30 chats (aumentamos para tener más cobertura)
+                    .filter(chat => chat.id)
+                    .sort((a, b) => {
+                        const timeA = a.lastMessage?.t || a.t || 0;
+                        const timeB = b.lastMessage?.t || b.t || 0;
+                        return timeB - timeA;
+                    })
+                    .slice(0, 50); // Top 50 chats para asegurar cobertura
 
                 let callsFound = 0;
                 let newCallsProcessed = 0;
@@ -1150,20 +1139,15 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                                 continue; // Ya procesado
                             }
 
-                            // DEBUG: Mostrar TODAS las llamadas encontradas (incluso entrantes)
+                            // DEBUG: Mostrar TODAS las llamadas encontradas
                             console.log(`[CallSync] 🔍 Found call_log: fromMe=${msg.fromMe}, body="${msg.body}", id=${callId}`);
-
-                            // Solo procesar llamadas salientes (fromMe: true)
-                            if (!msg.fromMe) {
-                                processedCallLogs.add(callId);
-                                continue;
-                            }
 
                             // Marcar como procesado
                             processedCallLogs.add(callId);
                             newCallsProcessed++;
 
-                            console.log(`\n📞 [CallSync] ========== LLAMADA SALIENTE ENCONTRADA EN HISTORIAL ==========`);
+                            const isOutgoing = msg.fromMe;
+                            console.log(`\n📞 [CallSync] ========== LLAMADA ${isOutgoing ? 'SALIENTE' : 'ENTRANTE'} ENCONTRADA EN HISTORIAL ==========`);
                             console.log(`   Chat: ${chat.id._serialized}`);
                             console.log(`   Call ID: ${callId}`);
                             console.log(`   Body: ${msg.body}`);
@@ -1179,13 +1163,19 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                             const contactName = await getContactName(client, chat.id._serialized);
 
                             // Determinar si es video según el body del mensaje
-                            const isVideo = msg.body && (
-                                msg.body.toLowerCase().includes('video') ||
-                                msg.body.toLowerCase().includes('videollamada')
-                            );
+                            const bodyText = (msg.body || '').toLowerCase();
+                            const isVideo = bodyText.includes('video') || bodyText.includes('videollamada');
+                            const isMissed = !isOutgoing && (bodyText.includes('missed') || bodyText.includes('perdida'));
 
                             // Generar un body descriptivo
-                            const callDescription = isVideo ? 'Videollamada saliente' : 'Llamada de voz saliente';
+                            let callDescription;
+                            if (isOutgoing) {
+                                callDescription = isVideo ? 'Videollamada saliente' : 'Llamada de voz saliente';
+                            } else {
+                                callDescription = isVideo ? 'Videollamada entrante' : 'Llamada de voz entrante';
+                                if (isMissed) callDescription += ' (perdida)';
+                            }
+
                             const displayBody = msg.body || callDescription;
 
                             // Crear payload para webhook
@@ -1193,20 +1183,21 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                                 session: sessionName,
                                 message: {
                                     id: callId,
-                                    from: sessionData.myNumber || '',
-                                    to: chat.id._serialized,
+                                    from: isOutgoing ? (sessionData.myNumber || '') : chat.id._serialized,
+                                    to: isOutgoing ? chat.id._serialized : (sessionData.myNumber || ''),
                                     body: `${isVideo ? '📹' : '📞'} ${displayBody}`,
                                     type: 'call_log',
-                                    fromMe: true,
+                                    fromMe: isOutgoing,
                                     timestamp: msg.timestamp,
                                     phoneNumber: phoneNumber,
                                     contactName: contactName || phoneNumber,
-                                    senderName: 'Tú',
+                                    senderName: isOutgoing ? 'Tú' : (contactName || phoneNumber),
                                     isGroup: false,
                                     groupName: null,
                                     callMetadata: {
                                         isVideo: isVideo,
-                                        direction: 'outbound',
+                                        isMissed: isMissed,
+                                        direction: isOutgoing ? 'outbound' : 'inbound',
                                         duration: 0,
                                         detectionMethod: 'history_sync',
                                         syncedFromMobile: true
