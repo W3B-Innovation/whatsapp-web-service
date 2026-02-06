@@ -761,40 +761,49 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
             }
         } catch (e) { console.error('Could not capture browser PID:', e); }
 
+        // Set custom User-Agent for device branding
+        try {
+            if (client.page && typeof client.page.setUserAgent === 'function') {
+                await client.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Bitend AI/1.0 Chrome/120.0.0.0 Safari/537.36');
+                console.log(`[UserAgent] Set custom User-Agent: "Bitend AI"`);
+            }
+        } catch (e) { console.error('Could not set User-Agent:', e); }
+
+
+
         // ============================================================================
-        // HOOK PARA DETECTAR LLAMADAS SALIENTES
+        // DETECCIÓN DE LLAMADAS SALIENTES - NUEVA IMPLEMENTACIÓN
         // ============================================================================
         try {
-            await client.page.evaluateOnNewDocument(() => {
-                // Este código se ejecuta en el contexto de la página de WhatsApp Web
-                setTimeout(() => {
-                    if (window.WPP && window.WPP.call && window.WPP.call.offer) {
-                        const originalOffer = window.WPP.call.offer;
+            console.log('[OutgoingCalls] 🚀 Starting outgoing call detection setup...');
 
-                        // Interceptar la función offer
-                        window.WPP.call.offer = function (to, options = {}) {
-                            console.log('[OUTGOING CALL DETECTED]', { to, options });
+            // Obtener el número de WhatsApp de esta sesión
+            try {
+                const hostDevice = await client.getHostDevice();
+                if (hostDevice && hostDevice.id && hostDevice.id.user) {
+                    sessionData.myNumber = hostDevice.id.user;
+                    console.log(`[OutgoingCalls] 📱 Session number: ${sessionData.myNumber}`);
+                }
+            } catch (e) {
+                console.warn('[OutgoingCalls] Could not get session number:', e.message);
+            }
 
-                            // Disparar un evento personalizado
-                            window.dispatchEvent(new CustomEvent('outgoing-call', {
-                                detail: { to, isVideo: options.isVideo || false, timestamp: Date.now() }
-                            }));
-
-                            // Llamar a la función original
-                            return originalOffer.call(this, to, options);
-                        };
-
-                        console.log('[Call Hook] WPP.call.offer intercepted successfully');
-                    }
-                }, 5000); // Esperar 5s para que WPP esté disponible
+            // Capturar logs de la consola del navegador para debugging
+            client.page.on('console', msg => {
+                const text = msg.text();
+                if (text.includes('[OutCall]') || text.includes('[WPP Call]')) {
+                    console.log(`[Browser] ${text}`);
+                }
             });
 
-            // Escuchar los eventos personalizados desde la página
-            await client.page.exposeFunction('onOutgoingCall', async (callData) => {
+            // Exponer función para comunicación browser → Node.js
+            await client.page.exposeFunction('_notifyOutgoingCall', async (callData) => {
                 try {
-                    console.log(`\n📤 ========== OUTGOING CALL DETECTED (via hook) ==========`);
-                    console.log('To:', callData.to);
-                    console.log('IsVideo:', callData.isVideo);
+                    console.log(`\n📤 ========== LLAMADA SALIENTE DETECTADA ==========`);
+                    console.log(`   To: ${callData.to}`);
+                    console.log(`   IsVideo: ${callData.isVideo}`);
+                    console.log(`   Timestamp: ${callData.timestamp}`);
+                    console.log(`   Method: ${callData.detectionMethod}`);
 
                     // Extraer número de teléfono
                     const phoneNumber = extractPhoneNumber({
@@ -804,17 +813,19 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     });
 
                     if (!phoneNumber) {
-                        console.log(`[Call Hook] Could not extract phone number`);
+                        console.log(`[OutgoingCalls] ⚠️  Could not extract phone number from ${callData.to}`);
                         return;
                     }
 
+                    // Obtener nombre del contacto
                     const contactName = await getContactName(client, callData.to);
 
+                    // Crear payload para el webhook
                     const payload = {
                         session: sessionName,
                         message: {
                             id: `call_out_${callData.timestamp}`,
-                            from: '',
+                            from: sessionData.myNumber || '',
                             to: callData.to,
                             body: `${callData.isVideo ? '📹' : '📞'} Llamada ${callData.isVideo ? 'de video' : 'de voz'}`,
                             type: 'call_log',
@@ -828,31 +839,420 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                             callMetadata: {
                                 isVideo: callData.isVideo,
                                 direction: 'outbound',
-                                duration: 0
+                                duration: callData.duration || 0,
+                                detectionMethod: callData.detectionMethod
                             }
                         }
                     };
 
-                    console.log(`[Call Hook] Sending OUTGOING call to webhook - Phone: ${phoneNumber}`);
-                    sendWebhook(webhookUrl, 'on_message', payload);
+                    console.log(`[OutgoingCalls] ✅ Sending to webhook - Contact: ${contactName || phoneNumber}`);
+                    await sendWebhook(webhookUrl, 'on_message', payload);
 
                 } catch (error) {
-                    console.error(`[Call Hook] Error processing outgoing call:`, error);
+                    console.error(`[OutgoingCalls] ❌ Error processing outgoing call:`, error);
                 }
             });
 
-            // Inyectar listener en la página
-            await client.page.evaluate(() => {
-                window.addEventListener('outgoing-call', (event) => {
-                    window.onOutgoingCall(event.detail);
+            // Esperar a que la página esté completamente cargada y WPP disponible
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            // Instalar hooks en el navegador (ejecutar después de que WPP esté cargado)
+            const hookResult = await client.page.evaluate(() => {
+                return new Promise((resolve) => {
+                    const installHooks = () => {
+                        console.log('[OutCall] 🔍 Checking WPP availability...');
+
+                        if (!window.WPP) {
+                            console.log('[OutCall] ❌ WPP not available yet, retrying...');
+                            return false;
+                        }
+
+                        console.log('[OutCall] ✅ WPP is available');
+                        console.log('[OutCall] 🔍 WPP.call exists:', !!window.WPP?.call);
+                        console.log('[OutCall] 🔍 WPP.ev exists:', !!window.WPP?.ev);
+                        console.log('[OutCall] 🔍 WPP.whatsapp.CallModel exists:', !!window.WPP?.whatsapp?.CallModel);
+
+                        // EXPLORACIÓN: Ver qué métodos están disponibles
+                        try {
+                            console.log('[OutCall] 🔍 === EXPLORING WPP.call ===');
+                            if (window.WPP?.call) {
+                                const callMethods = Object.keys(window.WPP.call);
+                                console.log('[OutCall] 🔍 Available methods in WPP.call:', callMethods);
+                            }
+
+                            console.log('[OutCall] 🔍 === EXPLORING Store/WPP.whatsapp.Call ===');
+                            const Store = window.Store || window.WPP?.whatsapp;
+                            if (Store?.Call) {
+                                console.log('[OutCall] 🔍 Store.Call exists, methods:', Object.keys(Store.Call).filter(k => typeof Store.Call[k] === 'function'));
+                            }
+
+                            console.log('[OutCall] 🔍 === EXPLORING WPP.ev call events ===');
+                            if (window.WPP?.ev) {
+                                // Listar todos los listeners registrados
+                                console.log('[OutCall] 🔍 WPP.ev listenerCount for "call.**":', window.WPP.ev.listenerCount?.('call.**'));
+                            }
+                        } catch (explorationError) {
+                            console.log('[OutCall] ⚠️  Exploration error:', explorationError.message);
+                        }
+
+                        const results = {
+                            wppAvailable: true,
+                            strategies: []
+                        };
+
+                        // ESTRATEGIA 1: Interceptar WPP.call.offer
+                        if (window.WPP?.call?.offer) {
+                            try {
+                                const originalOffer = window.WPP.call.offer;
+
+                                window.WPP.call.offer = async function (to, options = {}) {
+                                    console.log('[OutCall] 📞 WPP.call.offer intercepted!', { to, options });
+
+                                    // Notificar a Node.js
+                                    if (window._notifyOutgoingCall) {
+                                        window._notifyOutgoingCall({
+                                            to: typeof to === 'string' ? to : to._serialized || to.toString(),
+                                            isVideo: options.isVideo || false,
+                                            timestamp: Date.now(),
+                                            detectionMethod: 'offer_intercept'
+                                        });
+                                    }
+
+                                    // Llamar a la función original
+                                    return originalOffer.call(this, to, options);
+                                };
+
+                                results.strategies.push('offer_intercept');
+                                console.log('[OutCall] ✅ Offer intercept installed');
+                            } catch (e) {
+                                console.log('[OutCall] ⚠️  Offer intercept failed:', e.message);
+                            }
+                        }
+
+                        // ESTRATEGIA 2: Escuchar eventos de WPP.ev
+                        if (window.WPP?.ev) {
+                            try {
+                                // Listener genérico para TODOS los eventos de call (debugging)
+                                window.WPP.ev.on('call.**', (eventData) => {
+                                    console.log('[OutCall] 🎯 Generic call.** event triggered:', {
+                                        event: eventData,
+                                        type: typeof eventData,
+                                        keys: Object.keys(eventData || {})
+                                    });
+                                });
+
+                                // Escuchar todos los eventos de call
+                                window.WPP.ev.on('call.active_call', (call) => {
+                                    console.log('[OutCall] 🎯 call.active_call event:', call);
+
+                                    if (call?.peerJid && call?.isOutgoing !== false) {
+                                        window._notifyOutgoingCall({
+                                            to: call.peerJid._serialized || call.peerJid,
+                                            isVideo: call.isVideo || call.offerType === 'video',
+                                            timestamp: Date.now(),
+                                            detectionMethod: 'active_call_event'
+                                        });
+                                    }
+                                });
+
+                                // Evento alternativo
+                                window.WPP.ev.on('call.send_call_offer', (data) => {
+                                    console.log('[OutCall] 🎯 call.send_call_offer event:', data);
+
+                                    if (data?.to || data?.peer) {
+                                        const recipient = data.to || data.peer;
+                                        window._notifyOutgoingCall({
+                                            to: recipient._serialized || recipient,
+                                            isVideo: data.isVideo || data.offerType === 'video',
+                                            timestamp: Date.now(),
+                                            detectionMethod: 'send_offer_event'
+                                        });
+                                    }
+                                });
+
+                                results.strategies.push('ev_listeners');
+                                console.log('[OutCall] ✅ WPP.ev listeners installed');
+                            } catch (e) {
+                                console.log('[OutCall] ⚠️  WPP.ev listeners failed:', e.message);
+                            }
+                        }
+
+                        // ESTRATEGIA 3: Monitorear cambios en el Store de llamadas
+                        if (window.WPP?.whatsapp?.CallModel) {
+                            try {
+                                // Guardar referencia a las llamadas ya procesadas
+                                window._processedCalls = new Set();
+                                let debugCounter = 0;
+
+                                // Polling cada 2 segundos para verificar nuevas llamadas
+                                setInterval(() => {
+                                    try {
+                                        const Store = window.Store || window.WPP?.whatsapp;
+                                        const calls = Store?.Call?.getModelsArray?.() || [];
+
+                                        // Debug cada 30 segundos (cada 15 iteraciones)
+                                        debugCounter++;
+                                        if (debugCounter % 15 === 0) {
+                                            console.log(`[OutCall] 🔍 Debug: Found ${calls.length} total calls in Store`);
+                                        }
+
+                                        calls.forEach(call => {
+                                            const callId = call.id || call._serialized || JSON.stringify(call.peerJid);
+
+                                            // Si es una llamada nueva, loggear sus propiedades para debugging
+                                            if (!window._processedCalls.has(callId)) {
+                                                console.log('[OutCall] 🔍 New call found:', {
+                                                    id: callId,
+                                                    peer: call.peerJid?._serialized || call.peerJid,
+                                                    isOutgoing: call.isOutgoing,
+                                                    isIncoming: call.isIncoming,
+                                                    state: call.state,
+                                                    fromMe: call.fromMe,
+                                                    isVideo: call.isVideo,
+                                                    canHandleLocally: call.canHandleLocally,
+                                                    offerTime: call.offerTime,
+                                                    timestamp: call.timestamp
+                                                });
+
+                                                window._processedCalls.add(callId);
+
+                                                // Detectar si es una llamada saliente (múltiples propiedades posibles)
+                                                const isOutgoingCall = call.isOutgoing === true ||
+                                                    call.fromMe === true ||
+                                                    call.state === 'OUTGOING_RING' ||
+                                                    call.canHandleLocally === true;
+
+                                                if (isOutgoingCall && call.peerJid) {
+                                                    console.log('[OutCall] 🎯 Outgoing call confirmed! Notifying...');
+
+                                                    window._notifyOutgoingCall({
+                                                        to: call.peerJid._serialized || call.peerJid,
+                                                        isVideo: call.isVideo || call.offerType === 'video',
+                                                        timestamp: call.offerTime || call.timestamp || Date.now(),
+                                                        detectionMethod: 'store_polling',
+                                                        duration: call.duration || 0
+                                                    });
+                                                }
+                                            }
+                                        });
+                                    } catch (e) {
+                                        console.log('[OutCall] ⚠️  Polling error:', e.message);
+                                    }
+                                }, 2000);
+
+                                results.strategies.push('store_polling');
+                                console.log('[OutCall] ✅ Store polling started');
+                            } catch (e) {
+                                console.log('[OutCall] ⚠️  Store polling failed:', e.message);
+                            }
+                        }
+
+                        return results;
+                    };
+
+                    // Intentar instalar hooks con reintentos
+                    let attempts = 0;
+                    const maxAttempts = 10;
+
+                    const tryInstall = () => {
+                        attempts++;
+                        const result = installHooks();
+
+                        if (result) {
+                            resolve(result);
+                        } else if (attempts < maxAttempts) {
+                            setTimeout(tryInstall, 1000);
+                        } else {
+                            resolve({ wppAvailable: false, strategies: [], error: 'Max attempts reached' });
+                        }
+                    };
+
+                    tryInstall();
                 });
             });
 
-            console.log('[Call Hook] Outgoing call detection hook installed');
+            if (hookResult.wppAvailable) {
+                console.log(`[OutgoingCalls] ✅ Detection installed with ${hookResult.strategies.length} strategies:`);
+                hookResult.strategies.forEach(s => console.log(`   - ${s}`));
+            } else {
+                console.error('[OutgoingCalls] ❌ Failed to install detection:', hookResult.error);
+            }
 
         } catch (hookError) {
-            console.error('[Call Hook] Failed to install outgoing call hook:', hookError);
+            console.error('[OutgoingCalls] ❌ Setup failed:', hookError);
         }
+
+        // ============================================================================
+        // SINCRONIZACIÓN DE HISTORIAL DE LLAMADAS (para llamadas desde móvil)
+        // ============================================================================
+        const processedCallLogs = new Set();
+        const SYNC_INTERVAL = 10000; // 10 segundos
+        const MESSAGES_TO_CHECK = 5; // Revisar últimos 5 mensajes por chat
+
+        const syncCallLogsFromHistory = async () => {
+            try {
+                // Obtener todos los chats
+                const allChats = await client.listChats();
+
+                // DEBUG: Ver estructura de los chats
+                if (allChats.length > 0 && !syncCallLogsFromHistory._debugLogged) {
+                    const sampleChat = allChats[0];
+                    console.log(`[CallSync] 🔍 DEBUG: Sample chat structure:`, {
+                        id: sampleChat.id,
+                        isGroup: sampleChat.isGroup,
+                        hasLastMessage: !!sampleChat.lastMessage,
+                        lastMessageT: sampleChat.lastMessage?.t,
+                        lastMessageTimestamp: sampleChat.lastMessage?.timestamp,
+                        keys: Object.keys(sampleChat)
+                    });
+                    syncCallLogsFromHistory._debugLogged = true;
+                }
+
+                // Filtrar solo chats individuales (no grupos)
+                const individualChats = allChats.filter(chat => !chat.isGroup);
+
+                console.log(`[CallSync] 🔍 Found ${allChats.length} total chats, ${individualChats.length} individual chats`);
+
+                // Ordenar por actividad reciente y tomar los 20 más recientes
+                const recentChats = individualChats
+                    .filter(chat => chat.id) // Solo con ID válido
+                    .slice(0, 30); // Top 30 chats (aumentamos para tener más cobertura)
+
+                let callsFound = 0;
+                let newCallsProcessed = 0;
+                let chatsChecked = 0;
+
+                console.log(`[CallSync] 🔍 Checking ${recentChats.length} recent chats for call_log messages...`);
+
+                for (const chat of recentChats) {
+                    try {
+                        chatsChecked++;
+
+                        // Obtener últimos mensajes del chat
+                        const messages = await client.getMessages(chat.id._serialized, { count: MESSAGES_TO_CHECK });
+
+                        // DEBUG: Mostrar tipos de mensajes encontrados
+                        const messageTypes = messages.map(m => m.type).join(', ');
+                        if (chatsChecked <= 3) { // Solo mostrar para los primeros 3 chats
+                            console.log(`[CallSync] 🔍 Chat ${chat.id._serialized}: ${messages.length} messages, types: [${messageTypes}]`);
+                        }
+
+                        for (const msg of messages) {
+                            // Solo procesar call_log
+                            if (msg.type !== 'call_log') continue;
+
+                            callsFound++;
+
+                            // Crear ID único para evitar duplicados
+                            const callId = `${msg.id._serialized || msg.id}`;
+
+                            if (processedCallLogs.has(callId)) {
+                                continue; // Ya procesado
+                            }
+
+                            // DEBUG: Mostrar TODAS las llamadas encontradas (incluso entrantes)
+                            console.log(`[CallSync] 🔍 Found call_log: fromMe=${msg.fromMe}, body="${msg.body}", id=${callId}`);
+
+                            // Solo procesar llamadas salientes (fromMe: true)
+                            if (!msg.fromMe) {
+                                processedCallLogs.add(callId);
+                                continue;
+                            }
+
+                            // Marcar como procesado
+                            processedCallLogs.add(callId);
+                            newCallsProcessed++;
+
+                            console.log(`\n📞 [CallSync] ========== LLAMADA SALIENTE ENCONTRADA EN HISTORIAL ==========`);
+                            console.log(`   Chat: ${chat.id._serialized}`);
+                            console.log(`   Call ID: ${callId}`);
+                            console.log(`   Body: ${msg.body}`);
+                            console.log(`   Timestamp: ${msg.timestamp}`);
+
+                            // Extraer información de la llamada
+                            const phoneNumber = extractPhoneNumber(msg);
+                            if (!phoneNumber) {
+                                console.log(`[CallSync] ⚠️  Could not extract phone number`);
+                                continue;
+                            }
+
+                            const contactName = await getContactName(client, chat.id._serialized);
+
+                            // Determinar si es video según el body del mensaje
+                            const isVideo = msg.body && (
+                                msg.body.toLowerCase().includes('video') ||
+                                msg.body.toLowerCase().includes('videollamada')
+                            );
+
+                            // Generar un body descriptivo
+                            const callDescription = isVideo ? 'Videollamada saliente' : 'Llamada de voz saliente';
+                            const displayBody = msg.body || callDescription;
+
+                            // Crear payload para webhook
+                            const payload = {
+                                session: sessionName,
+                                message: {
+                                    id: callId,
+                                    from: sessionData.myNumber || '',
+                                    to: chat.id._serialized,
+                                    body: `${isVideo ? '📹' : '📞'} ${displayBody}`,
+                                    type: 'call_log',
+                                    fromMe: true,
+                                    timestamp: msg.timestamp,
+                                    phoneNumber: phoneNumber,
+                                    contactName: contactName || phoneNumber,
+                                    senderName: 'Tú',
+                                    isGroup: false,
+                                    groupName: null,
+                                    callMetadata: {
+                                        isVideo: isVideo,
+                                        direction: 'outbound',
+                                        duration: 0,
+                                        detectionMethod: 'history_sync',
+                                        syncedFromMobile: true
+                                    }
+                                }
+                            };
+
+                            console.log(`[CallSync] ✅ Enviando al CRM - Contacto: ${contactName || phoneNumber}`);
+                            await sendWebhook(webhookUrl, 'on_message', payload);
+                            console.log(`================================================\n`);
+                        }
+                    } catch (chatError) {
+                        // Silenciar errores de chats individuales
+                        if (chatError.message && !chatError.message.includes('evaluate')) {
+                            console.warn(`[CallSync] ⚠️  Error processing chat ${chat.id._serialized}:`, chatError.message);
+                        }
+                    }
+                }
+
+                if (newCallsProcessed > 0) {
+                    console.log(`[CallSync] 📊 Sync complete: ${newCallsProcessed} new calls processed (${callsFound} total found in history)`);
+                } else if (callsFound > 0) {
+                    console.log(`[CallSync] 📊 Found ${callsFound} call_log messages (all already processed)`);
+                }
+
+                // Limpiar cache si crece mucho (mantener últimos 500)
+                if (processedCallLogs.size > 500) {
+                    const toKeep = Array.from(processedCallLogs).slice(-500);
+                    processedCallLogs.clear();
+                    toKeep.forEach(id => processedCallLogs.add(id));
+                }
+
+            } catch (syncError) {
+                console.error(`[CallSync] ❌ Sync error:`, syncError.message);
+            }
+        };
+
+        // Iniciar sincronización periódica
+        console.log(`[CallSync] 🔄 Starting call history sync (every ${SYNC_INTERVAL / 1000}s, checking last ${MESSAGES_TO_CHECK} messages per chat)`);
+
+        // Primera sincronización después de 5 segundos
+        setTimeout(() => {
+            syncCallLogsFromHistory();
+            // Luego cada SYNC_INTERVAL
+            setInterval(syncCallLogsFromHistory, SYNC_INTERVAL);
+        }, 5000);
 
 
         // ============================================================================
@@ -924,6 +1324,19 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 console.log(`[Valid] Processing message from phone: ${phoneNumber}`);
                 console.log(`[Debug] Message body:`, message.body);
                 console.log(`[Debug] Message has mentionedIds:`, message.mentionedIds || 'None');
+
+                // 📞 LOGGING ESPECIAL PARA CALL_LOG
+                if (message.type === 'call_log') {
+                    console.log(`\n📞 ========== CALL_LOG MESSAGE DETECTED ==========`);
+                    console.log(`   From: ${message.from}`);
+                    console.log(`   To: ${message.to}`);
+                    console.log(`   FromMe: ${message.fromMe}`);
+                    console.log(`   Body: ${message.body}`);
+                    console.log(`   Phone: ${phoneNumber}`);
+                    console.log(`   Timestamp: ${ts}`);
+                    console.log(`   Full message keys:`, Object.keys(message));
+                    console.log(`================================================\n`);
+                }
 
                 // Procesar menciones - Intentar de dos formas:
                 // 1. Usando mentionedIds si está disponible
