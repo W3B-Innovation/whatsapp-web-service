@@ -258,6 +258,9 @@ async function getContactName(client, phoneId) {
 
         return name;
     } catch (e) {
+        // Si el error es "detached Frame", propagarlo para que pueda reiniciar la sesión
+        if (e.message && e.message.includes('detached Frame')) throw e;
+
         console.warn(`[ContactName] Error getting contact name for ${phoneId}:`, e.message);
         return null;
     }
@@ -332,6 +335,9 @@ async function getRealPhoneNumber(client, phoneId) {
         console.warn(`[RealPhone] Could not extract real phone number for ${phoneId}`);
         return null;
     } catch (e) {
+        // Si el error es "detached Frame", propagarlo
+        if (e.message && e.message.includes('detached Frame')) throw e;
+
         console.warn(`[RealPhone] Error getting real phone for ${phoneId}:`, e.message);
         return null;
     }
@@ -381,6 +387,9 @@ async function getContactInfo(client, phoneId) {
                     }
                 }
             } catch (lidError) {
+                // Propagar error crítico
+                if (lidError.message && lidError.message.includes('detached Frame')) throw lidError;
+
                 console.error(`[ContactInfo] ❌ getPnLidEntry failed for ${phoneId}:`, lidError.message);
                 console.error(`[ContactInfo] ❌ Full error:`, lidError);
             }
@@ -461,6 +470,9 @@ async function getContactInfo(client, phoneId) {
             isMyContact: contact.isMyContact || false
         };
     } catch (e) {
+        // Si el error es "detached Frame", propagarlo
+        if (e.message && e.message.includes('detached Frame')) throw e;
+
         console.warn(`[ContactInfo] Error getting contact info for ${phoneId}:`, e.message);
         return { name: null, phoneNumber: null, contact: null };
     }
@@ -478,6 +490,8 @@ async function getGroupInfo(client, groupId) {
             isGroup: true
         };
     } catch (e) {
+        if (e.message && e.message.includes('detached Frame')) throw e;
+
         console.warn(`Could not get group info for ${groupId}:`, e.message);
         return { name: 'Grupo', isGroup: true };
     }
@@ -623,6 +637,41 @@ const terminateAndDeleteSession = async (session) => {
 
 // Mantener alias para compatibilidad con código existente
 const termitateSession = terminateAndDeleteSession;
+
+// ============================================================================
+// SESSION RECOVERY
+// ============================================================================
+const restartingSessions = new Set();
+
+const restartSession = async (sessionName, webhookUrl) => {
+    if (restartingSessions.has(sessionName)) {
+        console.log(`[Restart] Session ${sessionName} already restarting...`);
+        return;
+    }
+    restartingSessions.add(sessionName);
+
+    try {
+        console.warn(`[Restart] 🔴 CRITICAL: Restarting session ${sessionName} due to browser error...`);
+
+        // 1. Cerrar sesión actual (preservando tokens)
+        await closeSession(sessionName);
+
+        // 2. Esperar un momento para asegurar limpieza
+        await new Promise(r => setTimeout(r, 5000));
+
+        // 3. Iniciar nueva sesión
+        console.log(`[Restart] 🚀 Launching new process for ${sessionName}...`);
+        startWppSession(sessionName, webhookUrl);
+
+    } catch (e) {
+        console.error(`[Restart] ❌ Failed to restart session ${sessionName}:`, e);
+    } finally {
+        // Remover del set después de un tiempo prudencial para evitar bucles rápidos
+        setTimeout(() => {
+            restartingSessions.delete(sessionName);
+        }, 20000); // 20 segundos de cool-down
+    }
+};
 
 const startWppSession = async (sessionName, webhookUrl, res = null) => {
     const serviceStartTime = Math.floor(Date.now() / 1000);
@@ -1001,6 +1050,12 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
 
             } catch (error) {
                 console.error(`[Error] Processing message ${message.id}:`, error);
+
+                // Detectar error crítico "detached Frame" y reiniciar sesión
+                if (error.message && error.message.includes('detached Frame')) {
+                    console.error(`[CRITICAL] Browser frame detached for session ${sessionName}. Initiating restart...`);
+                    restartSession(sessionName, webhookUrl);
+                }
             }
         });
 
