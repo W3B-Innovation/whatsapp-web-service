@@ -20,6 +20,9 @@ const PORT = process.env.PORT || 4000;
 const SECRET_KEY = process.env.SECRET_KEY || 'THISISMYSECURETOKEN';
 const SESSION_LIMIT = parseInt(process.env.SESSION_LIMIT || '5', 10);
 
+/** Escuchar y sincronizar llamadas entrantes/salientes (call_log). Por defecto deshabilitado (false). */
+const ENABLE_CALL_LISTENING = (process.env.ENABLE_CALL_LISTENING || 'false') === 'true';
+
 const TOKENS_DIR = path.resolve(process.cwd(), 'tokens');
 const BROWSER_DATA_DIR = path.resolve(process.cwd(), '.wpp_browser_data');
 
@@ -866,8 +869,9 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
 
 
         // ============================================================================
-        // DETECCIÓN DE LLAMADAS SALIENTES - NUEVA IMPLEMENTACIÓN
+        // DETECCIÓN DE LLAMADAS SALIENTES - NUEVA IMPLEMENTACIÓN (deshabilitado si ENABLE_CALL_LISTENING=false)
         // ============================================================================
+        if (ENABLE_CALL_LISTENING) {
         try {
             console.log('[OutgoingCalls] 🚀 Starting outgoing call detection setup...');
 
@@ -1346,7 +1350,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
             // Luego cada SYNC_INTERVAL
             setInterval(syncCallLogsFromHistory, SYNC_INTERVAL);
         }, 5000);
-
+        } // end ENABLE_CALL_LISTENING
 
         // ============================================================================
         // MENSAJE HANDLER - MEJORADO CON FILTROS
@@ -1373,7 +1377,10 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     return;
                 }
 
-                // 3. VALIDAR TIPO DE MENSAJE
+                // 3. VALIDAR TIPO DE MENSAJE (call_log ignorado si ENABLE_CALL_LISTENING=false)
+                if (!ENABLE_CALL_LISTENING && message.type === 'call_log') {
+                    return;
+                }
                 const validTypes = ['chat', 'image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location', 'multi_vcard', 'call_log'];
                 if (!validTypes.includes(message.type)) {
                     // 🔍 TEMPORAL: Log para detectar si hay tipos de mensaje relacionados con llamadas
