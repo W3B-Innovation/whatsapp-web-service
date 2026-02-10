@@ -20,9 +20,6 @@ const PORT = process.env.PORT || 4000;
 const SECRET_KEY = process.env.SECRET_KEY || 'THISISMYSECURETOKEN';
 const SESSION_LIMIT = parseInt(process.env.SESSION_LIMIT || '5', 10);
 
-/** Escuchar y sincronizar llamadas entrantes/salientes (call_log). Por defecto deshabilitado (false). */
-const ENABLE_CALL_LISTENING = (process.env.ENABLE_CALL_LISTENING || 'false') === 'true';
-
 const TOKENS_DIR = path.resolve(process.cwd(), 'tokens');
 const BROWSER_DATA_DIR = path.resolve(process.cwd(), '.wpp_browser_data');
 
@@ -142,15 +139,7 @@ function isStatusMessage(message) {
  * Los LIDs tienen formato: 86299532898535:22@lid o similar
  */
 function isLID(phoneId) {
-    if (!phoneId || typeof phoneId !== 'string') return false;
-    if (phoneId.includes('@lid') || phoneId.includes(':')) return true;
-
-    // IDs numéricos de 14 o más dígitos suelen ser LIDs (o IDs internos)
-    // Los números de teléfono reales raramente superan los 13 dígitos
-    const clean = phoneId.replace(/@.*$/g, '');
-    if (clean.length >= 14 && /^\d+$/.test(clean)) return true;
-
-    return false;
+    return phoneId && (phoneId.includes('@lid') || phoneId.includes(':'));
 }
 
 /**
@@ -189,19 +178,14 @@ function extractPhoneFromLID(lidString) {
 function extractPhoneNumber(message) {
     let phoneId = null;
 
-    // 1. Determinar el ID base (from/to)
-    phoneId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
-
-    // 2. Si es un mensaje ENTRANTE 1-to-1 y el phoneId es un LID, intentar obtener el número real
-    // Solo lo hacemos para mensajes entrantes porque en los salientes el "author" somos nosotros mismos
-    const isGroup = (phoneId && phoneId.includes('@g.us')) || (message.chat && message.chat.isGroup);
-
-    if (!isGroup && !message.fromMe) {
-        const possibleRealId = message.author || message.participant || (message.sender && message.sender.id) || (message.id && message.id.participant);
-        if (possibleRealId && isLID(phoneId) && !isLID(possibleRealId)) {
-            console.log(`[LID] Resolved real number from message property for incoming message: ${possibleRealId}`);
-            phoneId = possibleRealId;
-        }
+    // Determinar el ID correcto según la dirección del mensaje
+    if (message.fromMe) {
+        // Mensaje saliente: usar 'to' (generalmente el ID del chat/grupo/usuario destino)
+        // OJO: message.to es el destinatario real. message.chatId a veces es el LID del usuario propio si lo manda desde otro dispositivo.
+        phoneId = message.to || message.chatId;
+    } else {
+        // Mensaje entrante: usar 'from'
+        phoneId = message.from || message.chatId;
     }
 
     if (!phoneId) return null;
@@ -229,17 +213,15 @@ function extractPhoneNumber(message) {
         return lidCleaned;
     }
 
-    // Limpiar el ID
-    let cleanPhone = phoneId.replace(/@c.us|@g.us|@s.whatsapp.net|@broadcast|@lid/g, '');
-
-    // Normalización para México (521 -> 52)
-    if (cleanPhone.startsWith('521') && cleanPhone.length === 13) {
-        cleanPhone = '52' + cleanPhone.substring(3);
-    }
+    // Limpiar el ID (Soporte para @lid que es el nuevo formato de ID privado)
+    // También @g.us y otros
+    const cleanPhone = phoneId.replace(/@c.us|@g.us|@s.whatsapp.net|@broadcast|@lid/g, '');
 
     // Validar
     if (!isValidPhoneNumber(cleanPhone)) {
+        // Si es un grupo, a veces el ID es largo y válido, intentemos confiar si tiene @g.us el original
         if (phoneId.includes('@g.us')) return cleanPhone;
+
         console.log(`[Filter] Invalid phone number: ${cleanPhone} from ${phoneId}`);
         return null;
     }
@@ -276,9 +258,6 @@ async function getContactName(client, phoneId) {
 
         return name;
     } catch (e) {
-        // Si el error es "detached Frame", propagarlo para que pueda reiniciar la sesión
-        if (e.message && e.message.includes('detached Frame')) throw e;
-
         console.warn(`[ContactName] Error getting contact name for ${phoneId}:`, e.message);
         return null;
     }
@@ -322,32 +301,17 @@ async function getRealPhoneNumber(client, phoneId) {
 
         if (contact) {
             // Intentar diferentes fuentes del número en orden de confiabilidad
-            // Para LIDs, formattedName suele contener el número real (ej: +52 1 951...)
-            const possibleNumbers = isLID(phoneId) ? [
-                contact.formattedName,
-                contact.number,
-                contact.id?.user,
-                contact.id?._serialized
-            ] : [
-                contact.number,
-                contact.formattedName,
-                contact.id?.user,
-                contact.id?._serialized
+            const possibleNumbers = [
+                contact.number,           // Número directo si está disponible
+                contact.id?.user,         // El campo 'user' en el ID generalmente tiene el número
+                contact.id?._serialized,  // ID serializado completo
+                contact.id                // ID como string
             ];
 
             for (const realNumber of possibleNumbers) {
                 if (realNumber && typeof realNumber === 'string') {
-                    // Limpiar y validar: remover +, espacios y sufijos
-                    let cleaned = realNumber
-                        .replace(/\+/g, '')
-                        .replace(/\s/g, '')
-                        .replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '')
-                        .split(':')[0];
-
-                    // Normalización para México (521 -> 52)
-                    if (cleaned.startsWith('521') && cleaned.length === 13) {
-                        cleaned = '52' + cleaned.substring(3);
-                    }
+                    // Limpiar y validar
+                    const cleaned = realNumber.replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '').split(':')[0];
 
                     if (isValidPhoneNumber(cleaned)) {
                         console.log(`[RealPhone] ✓ Found real number: ${cleaned} for ID: ${phoneId}`);
@@ -368,9 +332,6 @@ async function getRealPhoneNumber(client, phoneId) {
         console.warn(`[RealPhone] Could not extract real phone number for ${phoneId}`);
         return null;
     } catch (e) {
-        // Si el error es "detached Frame", propagarlo
-        if (e.message && e.message.includes('detached Frame')) throw e;
-
         console.warn(`[RealPhone] Error getting real phone for ${phoneId}:`, e.message);
         return null;
     }
@@ -420,9 +381,6 @@ async function getContactInfo(client, phoneId) {
                     }
                 }
             } catch (lidError) {
-                // Propagar error crítico
-                if (lidError.message && lidError.message.includes('detached Frame')) throw lidError;
-
                 console.error(`[ContactInfo] ❌ getPnLidEntry failed for ${phoneId}:`, lidError.message);
                 console.error(`[ContactInfo] ❌ Full error:`, lidError);
             }
@@ -474,16 +432,11 @@ async function getContactInfo(client, phoneId) {
             for (const num of possibleNumbers) {
                 if (num && typeof num === 'string') {
                     // Limpiar el número: remover +, espacios, sufijos de WhatsApp
-                    let cleaned = num
+                    const cleaned = num
                         .replace(/\+/g, '')  // Remover +
                         .replace(/\s/g, '')  // Remover espacios
                         .replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid|@broadcast/g, '')
                         .split(':')[0];
-
-                    // Normalización para México (521 -> 52)
-                    if (cleaned.startsWith('521') && cleaned.length === 13) {
-                        cleaned = '52' + cleaned.substring(3);
-                    }
 
                     console.log(`[ContactInfo] 🔍 Trying "${num}" → cleaned: "${cleaned}" → valid: ${isValidPhoneNumber(cleaned)}`);
 
@@ -508,9 +461,6 @@ async function getContactInfo(client, phoneId) {
             isMyContact: contact.isMyContact || false
         };
     } catch (e) {
-        // Si el error es "detached Frame", propagarlo
-        if (e.message && e.message.includes('detached Frame')) throw e;
-
         console.warn(`[ContactInfo] Error getting contact info for ${phoneId}:`, e.message);
         return { name: null, phoneNumber: null, contact: null };
     }
@@ -528,8 +478,6 @@ async function getGroupInfo(client, groupId) {
             isGroup: true
         };
     } catch (e) {
-        if (e.message && e.message.includes('detached Frame')) throw e;
-
         console.warn(`Could not get group info for ${groupId}:`, e.message);
         return { name: 'Grupo', isGroup: true };
     }
@@ -560,6 +508,68 @@ async function sendWebhook(url, event, data) {
     }
 }
 
+/**
+ * Envía una línea de log al CRM para mostrarla en la vista Business (por companyId).
+ * Solo se guardan logs de sesiones que existan en Firestore con companyId.
+ * Fire-and-forget; no bloquea el flujo.
+ */
+function sendLogEntry(webhookUrl, sessionName, level, message) {
+    if (!webhookUrl || !sessionName) return;
+    const logsUrl = webhookUrl.replace(/\/webhook\/?$/, '') + '/logs';
+    const token = process.env.CRM_SYNC_TOKEN || process.env.SECRET_KEY || process.env.WHATSAPP_WEB_SYNC_TOKEN || '';
+    fetch(logsUrl, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            ...(token && { Authorization: `Bearer ${token}` }),
+        },
+        body: JSON.stringify({ sessionName, level: level || 'info', message: String(message).slice(0, 2000) }),
+    })
+        .then((res) => {
+            if (!res.ok) {
+                console.warn(`[Logs] POST ${logsUrl} failed: ${res.status} ${res.statusText} (session: ${sessionName})`);
+            }
+        })
+        .catch((err) => {
+            console.warn(`[Logs] Failed to send log to CRM: ${err.message} (url: ${logsUrl})`);
+        });
+}
+
+/**
+ * Extrae el nombre de sesión de un mensaje de log (ej: [wwwq:client], "for wwwq:", "Starting session: wwwq").
+ */
+function extractSessionFromLogMessage(text) {
+    if (typeof text !== 'string') return null;
+    const m = text.match(/\[([a-zA-Z0-9_-]+):/) || text.match(/for\s+([a-zA-Z0-9_-]+):/) || text.match(/Starting session:\s*([a-zA-Z0-9_-]+)/) || text.match(/Session\s+([a-zA-Z0-9_-]+)\s+/) || text.match(/Captured PID for\s+([a-zA-Z0-9_-]+)/) || text.match(/Status change for\s+([a-zA-Z0-9_-]+):/);
+    return m ? m[1] : null;
+}
+
+/**
+ * Envía todos los logs de consola al CRM cuando el mensaje contiene una sesión conocida con webhookUrl.
+ * Intercepta console.log/info/warn/error y reenvía al endpoint de logs (fire-and-forget).
+ */
+function pipeConsoleToCrm() {
+    const levels = ['log', 'info', 'warn', 'error'];
+    levels.forEach((level) => {
+        const original = console[level];
+        console[level] = function (...args) {
+            original.apply(console, args);
+            try {
+                const text = args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+                if (text.includes('[Logs]')) return;
+                const sessionName = extractSessionFromLogMessage(text);
+                if (!sessionName) return;
+                const data = sessions.get(sessionName);
+                const webhookUrl = data?.webhookUrl;
+                if (!webhookUrl) return;
+                const levelMap = { log: 'info', info: 'info', warn: 'warn', error: 'error' };
+                sendLogEntry(webhookUrl, sessionName, levelMap[level] || 'info', text.slice(0, 2000));
+            } catch (_) {}
+        };
+    });
+}
+pipeConsoleToCrm();
+
 // ============================================================================
 // WPPCONNECT LOGIC
 // ============================================================================
@@ -571,6 +581,8 @@ async function sendWebhook(url, event, data) {
 const closeSession = async (session) => {
     console.log(`[Close] Closing session: ${session} (preserving tokens)`);
     const data = sessions.get(session);
+    const webhookUrlForLog = data?.webhookUrl;
+    if (webhookUrlForLog) sendLogEntry(webhookUrlForLog, session, 'info', 'Sesión cerrada (tokens conservados).');
 
     if (data && data.client) {
         try {
@@ -619,6 +631,8 @@ const closeSession = async (session) => {
 const terminateAndDeleteSession = async (session) => {
     console.log(`[Terminate] Completely deleting session: ${session}`);
     const data = sessions.get(session);
+    const webhookUrlForLog = data?.webhookUrl;
+    if (webhookUrlForLog) sendLogEntry(webhookUrlForLog, session, 'info', 'Sesión eliminada por el usuario (borrado de tokens).');
 
     if (data && data.client) {
         try {
@@ -671,45 +685,11 @@ const terminateAndDeleteSession = async (session) => {
     sessions.delete(session);
     removeSessionFromFile(session);
     console.log(`[Terminate] Session ${session} completely deleted`);
+    if (webhookUrlForLog) sendLogEntry(webhookUrlForLog, session, 'info', 'Session terminated and deleted');
 };
 
 // Mantener alias para compatibilidad con código existente
 const termitateSession = terminateAndDeleteSession;
-
-// ============================================================================
-// SESSION RECOVERY
-// ============================================================================
-const restartingSessions = new Set();
-
-const restartSession = async (sessionName, webhookUrl) => {
-    if (restartingSessions.has(sessionName)) {
-        console.log(`[Restart] Session ${sessionName} already restarting...`);
-        return;
-    }
-    restartingSessions.add(sessionName);
-
-    try {
-        console.warn(`[Restart] 🔴 CRITICAL: Restarting session ${sessionName} due to browser error...`);
-
-        // 1. Cerrar sesión actual (preservando tokens)
-        await closeSession(sessionName);
-
-        // 2. Esperar un momento para asegurar limpieza
-        await new Promise(r => setTimeout(r, 5000));
-
-        // 3. Iniciar nueva sesión
-        console.log(`[Restart] 🚀 Launching new process for ${sessionName}...`);
-        startWppSession(sessionName, webhookUrl);
-
-    } catch (e) {
-        console.error(`[Restart] ❌ Failed to restart session ${sessionName}:`, e);
-    } finally {
-        // Remover del set después de un tiempo prudencial para evitar bucles rápidos
-        setTimeout(() => {
-            restartingSessions.delete(sessionName);
-        }, 20000); // 20 segundos de cool-down
-    }
-};
 
 const startWppSession = async (sessionName, webhookUrl, res = null) => {
     const serviceStartTime = Math.floor(Date.now() / 1000);
@@ -750,6 +730,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
 
     try {
         console.log(`Starting session: ${sessionName}`);
+        sendLogEntry(webhookUrl, sessionName, 'info', 'Starting session');
 
         // Garbage collection eliminado - ahora reutilizamos las carpetas existentes
         // para permitir persistencia de sesiones
@@ -764,6 +745,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
             session: sessionName,
             catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
                 console.log(`QR received for ${sessionName}, attempt ${attempts}`);
+                sendLogEntry(webhookUrl, sessionName, 'info', `QR received, attempt ${attempts}`);
                 sessionData.qr = base64Qr;
                 sessionData.status = 'WAITING_QR';
 
@@ -778,6 +760,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                         const currentSession = sessions.get(sessionName);
                         if (currentSession && (currentSession.status === 'WAITING_QR' || currentSession.status === 'INITIALIZING')) {
                             console.log(`Session ${sessionName} timed out (QR not scanned). Cleaning up...`);
+                            sendLogEntry(webhookUrl, sessionName, 'warn', 'QR expirado (no escaneado a tiempo). Sesión cerrada.');
                             await termitateSession(sessionName);
                             sendWebhook(webhookUrl, 'status_change', { session: sessionName, status: 'qr_expired' });
                         }
@@ -786,6 +769,10 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
             },
             statusFind: (statusSession, session) => {
                 console.log(`Status change for ${sessionName}: ${statusSession}`);
+                sendLogEntry(webhookUrl, sessionName, 'info', `Status change: ${statusSession}`);
+                if (statusSession === 'notLogged' || statusSession === 'disconnectedMobile') {
+                    sendLogEntry(webhookUrl, sessionName, 'warn', `Sesión desconectada (${statusSession}). Escanear QR de nuevo o reconectar.`);
+                }
                 sessionData.status = statusSession;
 
                 sendWebhook(webhookUrl, 'status_change', { session: sessionName, status: statusSession });
@@ -833,16 +820,6 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
 
         sessionData.client = client;
 
-        // ============================================================================
-        // DEDUPLICACIÓN DE LLAMADAS (Tiempo Real y Sincronización)
-        // =============-===============================================================
-        const processedCallLogs = new Set();
-        const getCallKey = (phone, timestamp, isOutgoing) => {
-            // Normalizar timestamp y redondearlo a 10s para absorber diferencias
-            const ts = Math.floor(timestamp / 10) * 10;
-            return `${phone}_${ts}_${isOutgoing ? 'out' : 'in'}`;
-        };
-
         // Capture PID
         try {
             let browser = null;
@@ -858,331 +835,30 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
             }
         } catch (e) { console.error('Could not capture browser PID:', e); }
 
-        // Set custom User-Agent for device branding
-        try {
-            if (client.page && typeof client.page.setUserAgent === 'function') {
-                await client.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Bitend AI/1.0 Chrome/120.0.0.0 Safari/537.36');
-                console.log(`[UserAgent] Set custom User-Agent: "Bitend AI"`);
-            }
-        } catch (e) { console.error('Could not set User-Agent:', e); }
-
-
-
-        // ============================================================================
-        // DETECCIÓN DE LLAMADAS SALIENTES - NUEVA IMPLEMENTACIÓN (deshabilitado si ENABLE_CALL_LISTENING=false)
-        // ============================================================================
-        if (ENABLE_CALL_LISTENING) {
-        try {
-            console.log('[OutgoingCalls] 🚀 Starting outgoing call detection setup...');
-
-            // Obtener el número de WhatsApp de esta sesión
-            try {
-                const hostDevice = await client.getHostDevice();
-                if (hostDevice && hostDevice.id && hostDevice.id.user) {
-                    sessionData.myNumber = hostDevice.id.user;
-                    console.log(`[OutgoingCalls] 📱 Session number: ${sessionData.myNumber}`);
-                }
-            } catch (e) {
-                console.warn('[OutgoingCalls] Could not get session number:', e.message);
-            }
-
-            // Capturar logs de la consola del navegador para debugging
-            client.page.on('console', msg => {
-                const text = msg.text();
-                if (text.includes('[OutCall]') || text.includes('[WPP Call]')) {
-                    console.log(`[Browser] ${text}`);
-                }
+        // Cuando la interfaz pasa a NORMAL (conectado), notificar inChat para que el CRM muestre verde.
+        // wppconnect no llama statusFind('inChat') después de qrReadSuccess, y a veces emite
+        // MAIN (NORMAL) antes de que registremos el listener, por eso añadimos fallback con setTimeout.
+        const trySetInChat = () => {
+            if (sessionData.status === 'inChat') return;
+            sessionData.status = 'inChat';
+            sessionData.qr = null;
+            console.log(`Status change for ${sessionName}: inChat`);
+            sendWebhook(webhookUrl, 'status_change', { session: sessionName, status: 'inChat' });
+            sendLogEntry(webhookUrl, sessionName, 'info', 'Status change: inChat');
+        };
+        if (typeof client.onInterfaceChange === 'function') {
+            client.onInterfaceChange((state) => {
+                const displayInfo = state && (state.displayInfo || state.state);
+                if (displayInfo === 'NORMAL') trySetInChat();
             });
-
-            // Exponer función para comunicación browser → Node.js
-            await client.page.exposeFunction('_notifyOutgoingCall', async (callData) => {
-                try {
-                    console.log(`\n📤 ========== LLAMADA SALIENTE DETECTADA ==========`);
-                    console.log(`   To: ${callData.to}`);
-                    console.log(`   IsVideo: ${callData.isVideo}`);
-                    console.log(`   Timestamp: ${callData.timestamp}`);
-                    console.log(`   Method: ${callData.detectionMethod}`);
-
-                    // Extraer número de teléfono (con resolución de LIDs)
-                    const phoneNumber = await getRealPhoneNumber(client, callData.to) || extractPhoneNumber({
-                        from: null,
-                        to: callData.to,
-                        fromMe: true
-                    });
-
-                    if (!phoneNumber) {
-                        console.log(`[OutgoingCalls] ⚠️  Could not extract phone number from ${callData.to}`);
-                        return;
-                    }
-
-                    // DEDUPLICACIÓN
-                    const callKey = getCallKey(phoneNumber, Math.floor(callData.timestamp / 1000), true);
-                    if (processedCallLogs.has(callKey)) {
-                        console.log(`[OutgoingCalls] ⏭️  Llamada duplicada detectada (key: ${callKey}), saltando...`);
-                        return;
-                    }
-                    processedCallLogs.add(callKey);
-
-                    // Obtener nombre del contacto
-                    const contactName = await getContactName(client, callData.to);
-
-                    // Crear payload para el webhook
-                    const payload = {
-                        session: sessionName,
-                        message: {
-                            id: `call_out_${callData.timestamp}`,
-                            from: sessionData.myNumber || '',
-                            to: callData.to,
-                            body: `${callData.isVideo ? '📹' : '📞'} Llamada ${callData.isVideo ? 'de video' : 'de voz'}`,
-                            type: 'call_log',
-                            fromMe: true,
-                            timestamp: Math.floor(callData.timestamp / 1000),
-                            phoneNumber: phoneNumber,
-                            contactName: contactName || phoneNumber,
-                            senderName: 'Tú',
-                            isGroup: false,
-                            groupName: null,
-                            callMetadata: {
-                                isVideo: callData.isVideo,
-                                direction: 'outbound',
-                                duration: callData.duration || 0,
-                                detectionMethod: callData.detectionMethod
-                            }
-                        }
-                    };
-
-                    console.log(`[OutgoingCalls] ✅ Sending to webhook - Contact: ${contactName || phoneNumber}`);
-                    await sendWebhook(webhookUrl, 'on_message', payload);
-
-                } catch (error) {
-                    console.error(`[OutgoingCalls] ❌ Error processing outgoing call:`, error);
-                }
-            });
-
-            // Esperar a que la página esté completamente cargada y WPP disponible
-            await new Promise(resolve => setTimeout(resolve, 3000));
-
-            // Instalar hooks en el navegador (ejecutar después de que WPP esté cargado)
-            const hookResult = await client.page.evaluate(() => {
-                return new Promise((resolve) => {
-                    const installHooks = () => {
-                        console.log('[OutCall] 🔍 Checking WPP availability...');
-
-                        if (!window.WPP) {
-                            console.log('[OutCall] ❌ WPP not available yet, retrying...');
-                            return false;
-                        }
-
-                        console.log('[OutCall] ✅ WPP is available');
-                        console.log('[OutCall] 🔍 WPP.call exists:', !!window.WPP?.call);
-                        console.log('[OutCall] 🔍 WPP.ev exists:', !!window.WPP?.ev);
-                        console.log('[OutCall] 🔍 WPP.whatsapp.CallModel exists:', !!window.WPP?.whatsapp?.CallModel);
-
-                        // EXPLORACIÓN: Ver qué métodos están disponibles
-                        try {
-                            console.log('[OutCall] 🔍 === EXPLORING WPP.call ===');
-                            if (window.WPP?.call) {
-                                const callMethods = Object.keys(window.WPP.call);
-                                console.log('[OutCall] 🔍 Available methods in WPP.call:', callMethods);
-                            }
-
-                            console.log('[OutCall] 🔍 === EXPLORING Store/WPP.whatsapp.Call ===');
-                            const Store = window.Store || window.WPP?.whatsapp;
-                            if (Store?.Call) {
-                                console.log('[OutCall] 🔍 Store.Call exists, methods:', Object.keys(Store.Call).filter(k => typeof Store.Call[k] === 'function'));
-                            }
-
-                            console.log('[OutCall] 🔍 === EXPLORING WPP.ev call events ===');
-                            if (window.WPP?.ev) {
-                                // Listar todos los listeners registrados
-                                console.log('[OutCall] 🔍 WPP.ev listenerCount for "call.**":', window.WPP.ev.listenerCount?.('call.**'));
-                            }
-                        } catch (explorationError) {
-                            console.log('[OutCall] ⚠️  Exploration error:', explorationError.message);
-                        }
-
-                        const results = {
-                            wppAvailable: true,
-                            strategies: []
-                        };
-
-                        // ESTRATEGIA 1: Interceptar WPP.call.offer
-                        if (window.WPP?.call?.offer) {
-                            try {
-                                const originalOffer = window.WPP.call.offer;
-
-                                window.WPP.call.offer = async function (to, options = {}) {
-                                    console.log('[OutCall] 📞 WPP.call.offer intercepted!', { to, options });
-
-                                    // Notificar a Node.js
-                                    if (window._notifyOutgoingCall) {
-                                        window._notifyOutgoingCall({
-                                            to: typeof to === 'string' ? to : to._serialized || to.toString(),
-                                            isVideo: options.isVideo || false,
-                                            timestamp: Date.now(),
-                                            detectionMethod: 'offer_intercept'
-                                        });
-                                    }
-
-                                    // Llamar a la función original
-                                    return originalOffer.call(this, to, options);
-                                };
-
-                                results.strategies.push('offer_intercept');
-                                console.log('[OutCall] ✅ Offer intercept installed');
-                            } catch (e) {
-                                console.log('[OutCall] ⚠️  Offer intercept failed:', e.message);
-                            }
-                        }
-
-                        // ESTRATEGIA 2: Escuchar eventos de WPP.ev
-                        if (window.WPP?.ev) {
-                            try {
-                                // Escuchar todos los eventos de call
-                                window.WPP.ev.on('call.active_call', (call) => {
-                                    console.log('[OutCall] 🎯 call.active_call event:', call);
-
-                                    if (call?.peerJid && call?.isOutgoing !== false) {
-                                        // Intentar obtener participante real si existe (para LIDs)
-                                        const realJid = call.author || call.participant || (call.peerJid?._serialized || call.peerJid);
-
-                                        window._notifyOutgoingCall({
-                                            to: realJid,
-                                            peerJid: call.peerJid?._serialized || call.peerJid,
-                                            isVideo: call.isVideo || call.offerType === 'video',
-                                            timestamp: Date.now(),
-                                            detectionMethod: 'active_call_event'
-                                        });
-                                    }
-                                });
-
-                                // Evento alternativo
-                                window.WPP.ev.on('call.send_call_offer', (data) => {
-                                    console.log('[OutCall] 🎯 call.send_call_offer event:', data);
-
-                                    if (data?.to || data?.peer) {
-                                        const recipient = data.to || data.peer;
-                                        window._notifyOutgoingCall({
-                                            to: recipient._serialized || recipient,
-                                            isVideo: data.isVideo || data.offerType === 'video',
-                                            timestamp: Date.now(),
-                                            detectionMethod: 'send_offer_event'
-                                        });
-                                    }
-                                });
-
-                                results.strategies.push('ev_listeners');
-                                console.log('[OutCall] ✅ WPP.ev listeners installed');
-                            } catch (e) {
-                                console.log('[OutCall] ⚠️  WPP.ev listeners failed:', e.message);
-                            }
-                        }
-
-                        // ESTRATEGIA 3: Monitorear cambios en el Store de llamadas
-                        if (window.WPP?.whatsapp?.CallModel) {
-                            try {
-                                // Guardar referencia a las llamadas ya procesadas
-                                window._processedCalls = new Set();
-                                let debugCounter = 0;
-
-                                // Polling cada 2 segundos para verificar nuevas llamadas
-                                setInterval(() => {
-                                    try {
-                                        const Store = window.Store || window.WPP?.whatsapp;
-                                        const calls = Store?.Call?.getModelsArray?.() || [];
-
-                                        // Debug cada 30 segundos (cada 15 iteraciones)
-                                        debugCounter++;
-                                        if (debugCounter % 15 === 0) {
-                                            console.log(`[OutCall] 🔍 Debug: Found ${calls.length} total calls in Store`);
-                                        }
-
-                                        calls.forEach(call => {
-                                            const callId = call.id || call._serialized || JSON.stringify(call.peerJid);
-
-                                            // Si es una llamada nueva, loggear sus propiedades para debugging
-                                            if (!window._processedCalls.has(callId)) {
-                                                console.log('[OutCall] 🔍 New call found:', {
-                                                    id: callId,
-                                                    peer: call.peerJid?._serialized || call.peerJid,
-                                                    isOutgoing: call.isOutgoing,
-                                                    isIncoming: call.isIncoming,
-                                                    state: call.state,
-                                                    fromMe: call.fromMe,
-                                                    isVideo: call.isVideo,
-                                                    canHandleLocally: call.canHandleLocally,
-                                                    offerTime: call.offerTime,
-                                                    timestamp: call.timestamp
-                                                });
-
-                                                window._processedCalls.add(callId);
-
-                                                // Detectar si es una llamada saliente (múltiples propiedades posibles)
-                                                const isOutgoingCall = call.isOutgoing === true ||
-                                                    call.fromMe === true ||
-                                                    call.state === 'OUTGOING_RING' ||
-                                                    call.canHandleLocally === true;
-
-                                                if (isOutgoingCall && call.peerJid) {
-                                                    console.log('[OutCall] 🎯 Outgoing call confirmed! Notifying...');
-
-                                                    window._notifyOutgoingCall({
-                                                        to: call.peerJid._serialized || call.peerJid,
-                                                        isVideo: call.isVideo || call.offerType === 'video',
-                                                        timestamp: call.offerTime || call.timestamp || Date.now(),
-                                                        detectionMethod: 'store_polling',
-                                                        duration: call.duration || 0
-                                                    });
-                                                }
-                                            }
-                                        });
-                                    } catch (e) {
-                                        console.log('[OutCall] ⚠️  Polling error:', e.message);
-                                    }
-                                }, 2000);
-
-                                results.strategies.push('store_polling');
-                                console.log('[OutCall] ✅ Store polling started');
-                            } catch (e) {
-                                console.log('[OutCall] ⚠️  Store polling failed:', e.message);
-                            }
-                        }
-
-                        return results;
-                    };
-
-                    // Intentar instalar hooks con reintentos
-                    let attempts = 0;
-                    const maxAttempts = 10;
-
-                    const tryInstall = () => {
-                        attempts++;
-                        const result = installHooks();
-
-                        if (result) {
-                            resolve(result);
-                        } else if (attempts < maxAttempts) {
-                            setTimeout(tryInstall, 1000);
-                        } else {
-                            resolve({ wppAvailable: false, strategies: [], error: 'Max attempts reached' });
-                        }
-                    };
-
-                    tryInstall();
-                });
-            });
-
-            if (hookResult.wppAvailable) {
-                console.log(`[OutgoingCalls] ✅ Detection installed with ${hookResult.strategies.length} strategies:`);
-                hookResult.strategies.forEach(s => console.log(`   - ${s}`));
-            } else {
-                console.error('[OutgoingCalls] ❌ Failed to install detection:', hookResult.error);
-            }
-
-        } catch (hookError) {
-            console.error('[OutgoingCalls] ❌ Setup failed:', hookError);
         }
-        } // end ENABLE_CALL_LISTENING
+        // Fallback: si acabamos de pasar por qrReadSuccess, es probable que ya estemos en NORMAL
+        // pero el evento se emitió antes de registrar el listener; forzar inChat a los 3s.
+        if (sessionData.status === 'qrReadSuccess') {
+            setTimeout(() => {
+                if (sessionData.status !== 'inChat') trySetInChat();
+            }, 3000);
+        }
 
         // ============================================================================
         // MENSAJE HANDLER - MEJORADO CON FILTROS
@@ -1209,25 +885,12 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     return;
                 }
 
-                // 3. VALIDAR TIPO DE MENSAJE (call_log ignorado si ENABLE_CALL_LISTENING=false)
-                if (!ENABLE_CALL_LISTENING && message.type === 'call_log') {
-                    return;
-                }
-                const validTypes = ['chat', 'image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location', 'multi_vcard', 'call_log'];
+                // 3. VALIDAR TIPO DE MENSAJE
+                const validTypes = ['chat', 'image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location', 'multi_vcard'];
                 if (!validTypes.includes(message.type)) {
-                    // 🔍 TEMPORAL: Log para detectar si hay tipos de mensaje relacionados con llamadas
-                    if (message.type && (message.type.includes('call') || message.body?.includes('Llamada') || message.body?.includes('Call'))) {
-                        console.log(`⚠️ [CALL DEBUG] Found non-standard call-related message:`);
-                        console.log(`   Type: ${message.type}`);
-                        console.log(`   Body: ${message.body}`);
-                        console.log(`   FromMe: ${message.fromMe}`);
-                        console.log(`   Full message:`, JSON.stringify(message, null, 2));
-                    }
                     console.log(`[Filter] Skipping invalid message type: ${message.type}`);
                     return;
                 }
-
-
 
                 // 4. FILTRAR MENSAJES VACÍOS
                 if (message.type === 'chat' && !message.body) {
@@ -1235,42 +898,27 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     return;
                 }
 
-                // 5. DETERMINAR EL ID Y RESOLVER NÚMERO
-                const originalPhoneId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
-                let phoneNumber = null;
-
-                // Si es un LID o ID sospechoso, intentar resolver número real primero
-                if (originalPhoneId && isLID(originalPhoneId)) {
-                    console.log(`[LID] Resolving real number for: ${originalPhoneId}`);
-                    phoneNumber = await getRealPhoneNumber(client, originalPhoneId);
-                }
-
-                // Fallback a extracción normal si no se resolvió o no es LID
+                // 5. EXTRAER NÚMERO DE TELÉFONO VÁLIDO
+                let phoneNumber = extractPhoneNumber(message);
                 if (!phoneNumber) {
-                    phoneNumber = extractPhoneNumber(message);
-                }
-
-                if (!phoneNumber) {
-                    console.log(`[Filter] Could not determine valid phone number for message from ${originalPhoneId}`);
+                    console.log(`[Filter] Could not extract valid phone number from message`);
                     return;
+                }
+
+                // 5.5 MEJORA: Si detectamos un LID, intentar obtener el número real
+                const originalPhoneId = message.fromMe ? (message.to || message.chatId) : (message.from || message.chatId);
+                if (originalPhoneId && isLID(originalPhoneId)) {
+                    console.log(`[LID] Attempting to get real phone number for LID: ${originalPhoneId}`);
+                    const realPhone = await getRealPhoneNumber(client, originalPhoneId);
+                    if (realPhone && realPhone !== phoneNumber) {
+                        console.log(`[LID] Replaced LID-based phone ${phoneNumber} with real phone: ${realPhone}`);
+                        phoneNumber = realPhone;
+                    }
                 }
 
                 console.log(`[Valid] Processing message from phone: ${phoneNumber}`);
                 console.log(`[Debug] Message body:`, message.body);
                 console.log(`[Debug] Message has mentionedIds:`, message.mentionedIds || 'None');
-
-                // 📞 LOGGING ESPECIAL PARA CALL_LOG
-                if (message.type === 'call_log') {
-                    console.log(`\n📞 ========== CALL_LOG MESSAGE DETECTED ==========`);
-                    console.log(`   From: ${message.from}`);
-                    console.log(`   To: ${message.to}`);
-                    console.log(`   FromMe: ${message.fromMe}`);
-                    console.log(`   Body: ${message.body}`);
-                    console.log(`   Phone: ${phoneNumber}`);
-                    console.log(`   Timestamp: ${ts}`);
-                    console.log(`   Full message keys:`, Object.keys(message));
-                    console.log(`================================================\n`);
-                }
 
                 // Procesar menciones - Intentar de dos formas:
                 // 1. Usando mentionedIds si está disponible
@@ -1382,29 +1030,9 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     console.log(`[Individual] Message ${message.fromMe ? 'TO' : 'FROM'} contact: ${contactName}, sender: ${senderName} (ID: ${targetId})`);
                 }
 
-                // 7. PROCESAR MEDIA Y LLAMADAS
+                // 7. PROCESAR MEDIA
                 let cleanBody = message.body;
                 let mediaData = null;
-                let callMetadata = null;
-
-                // Procesar llamadas (call_log)
-                if (message.type === 'call_log') {
-                    const callData = message.body || '';
-                    const isVideo = callData.includes('video') || callData.includes('Video') || callData.includes('vídeo');
-                    const isMissed = callData.includes('Missed') || callData.includes('perdida') || callData.includes('Perdida');
-
-                    cleanBody = `${isVideo ? '📹' : '📞'} Llamada ${isVideo ? 'de video' : 'de voz'}${isMissed ? ' (perdida)' : ''}`;
-
-                    callMetadata = {
-                        isVideo: isVideo,
-                        isMissed: isMissed,
-                        direction: message.fromMe ? 'outbound' : 'inbound',
-                        rawBody: callData
-                    };
-
-
-                    console.log(`[Call] Detected call_log - Direction: ${message.fromMe ? 'OUTBOUND' : 'INBOUND'}, isVideo: ${isVideo}, isMissed: ${isMissed}, Body: "${callData}"`);
-                }
 
                 const mediaTypes = ['image', 'video', 'ptt', 'audio', 'sticker', 'document', 'vcard', 'location'];
 
@@ -1430,6 +1058,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                             }
                         } catch (err) {
                             console.error(`Error downloading media for message ${message.id}:`, err);
+                            sendLogEntry(webhookUrl, sessionName, 'warn', `Error descargando media (${message.type}): ${err?.message || err}`);
                             cleanBody = `[Error descargando ${message.type}]`;
                         }
                     }
@@ -1442,9 +1071,6 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
 
                 // 8. CONSTRUIR PAYLOAD
                 const cleanPayload = (obj) => JSON.parse(JSON.stringify(obj));
-
-                const mimetypeMap = { image: 'image/jpeg', video: 'video/mp4', ptt: 'audio/ogg', audio: 'audio/ogg', sticker: 'image/webp', document: 'application/octet-stream' };
-                const mimetype = (message.mimetype || '').trim() || (mediaData && mimetypeMap[message.type]) || '';
 
                 const payload = cleanPayload({
                     session: sessionName,
@@ -1463,123 +1089,24 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                         groupName: groupName,
                         sender: message.sender || {},
                         mediaData: mediaData || null,
-                        mimetype: message.mimetype || '',
-                        callMetadata: callMetadata || null
+                        mimetype: message.mimetype || ''
                     }
                 });
 
-
-                // Log especial para llamadas
-                if (message.type === 'call_log' && callMetadata) {
-                    console.log(`\n📞 ========== SENDING CALL TO WEBHOOK ==========`);
-                    console.log(`Direction: ${callMetadata.direction === 'outbound' ? '📤 OUTBOUND (SALIENTE)' : '📥 INBOUND (ENTRANTE)'}`);
-                    console.log(`Type: ${callMetadata.isVideo ? 'VIDEO' : 'VOICE'}`);
-                    console.log(`Missed: ${callMetadata.isMissed}`);
-                    console.log(`Phone: ${phoneNumber}`);
-                    console.log(`FromMe: ${message.fromMe}`);
-                    console.log(`Payload.message.fromMe: ${payload.message.fromMe}`);
-                    console.log(`===============================================\n`);
-                } else {
-                    console.log(`[Webhook] Sending message to webhook - Phone: ${phoneNumber}, IsGroup: ${isGroup}, Group: ${groupName || 'N/A'}`);
-                }
-
+                console.log(`[Webhook] Sending message to webhook - Phone: ${phoneNumber}, IsGroup: ${isGroup}, Group: ${groupName || 'N/A'}`);
                 sendWebhook(webhookUrl, 'on_message', payload);
-
+                const contactLabel = isGroup ? `${groupName || 'N/A'} (grupo)` : (contactName || phoneNumber);
+                if (message.fromMe) {
+                    sendLogEntry(webhookUrl, sessionName, 'info', `Mensaje enviado a ${contactLabel}`);
+                } else {
+                    sendLogEntry(webhookUrl, sessionName, 'info', `Mensaje recibido de ${contactLabel}`);
+                }
 
             } catch (error) {
                 console.error(`[Error] Processing message ${message.id}:`, error);
-
-                // Detectar error crítico "detached Frame" y reiniciar sesión
-                if (error.message && error.message.includes('detached Frame')) {
-                    console.error(`[CRITICAL] Browser frame detached for session ${sessionName}. Initiating restart...`);
-                    restartSession(sessionName, webhookUrl);
-                }
+                sendLogEntry(webhookUrl, sessionName, 'error', `Error procesando mensaje: ${error?.message || error}`);
             }
         });
-
-        // ============================================================================
-        // CALL HANDLER - DETECTAR LLAMADAS EN TIEMPO REAL
-        // ============================================================================
-        if (typeof client.onIncomingCall === 'function') {
-            console.log(`[Call] onIncomingCall listener is available, registering...`);
-            client.onIncomingCall(async (call) => {
-                try {
-                    console.log(`\n🔔 ========== onIncomingCall TRIGGERED ==========`);
-                    console.log(`[Call] Incoming call detected:`, JSON.stringify(call, null, 2));
-
-                    // Extraer número de teléfono del caller
-                    // 1. Intentar de propiedades del objeto call (como author o id.participant)
-                    let peerId = call.peerJid;
-                    let possibleRealId = call.author || call.participant || (call.id && call.id.participant);
-
-                    if (possibleRealId && isLID(peerId) && !isLID(possibleRealId)) {
-                        peerId = possibleRealId;
-                    }
-
-                    const phoneNumber = await getRealPhoneNumber(client, peerId) || extractPhoneNumber({
-                        from: peerId,
-                        to: null,
-                        fromMe: false,
-                        author: call.author,
-                        participant: call.participant,
-                        id: call.id
-                    });
-
-                    if (!phoneNumber) {
-                        console.log(`[Call] Could not extract phone number from call`);
-                        return;
-                    }
-
-                    const contactName = await getContactName(client, call.peerJid);
-                    const isVideo = call.isVideo || false;
-                    const isGroup = call.isGroup || false;
-                    const isOutgoing = call.outgoing || false; // true = llamada saliente, false = entrante
-                    const timestamp = call.offerTime || Math.floor(Date.now() / 1000);
-
-                    // DEDUPLICACIÓN
-                    const callKey = getCallKey(phoneNumber, timestamp, isOutgoing);
-                    if (processedCallLogs.has(callKey)) {
-                        console.log(`[Call] ⏭️  Llamada duplicada detectada (key: ${callKey}), saltando...`);
-                        return;
-                    }
-                    processedCallLogs.add(callKey);
-
-                    const payload = {
-                        session: sessionName,
-                        message: {
-                            id: call.id || `call_${Date.now()}`,
-                            from: isOutgoing ? '' : call.peerJid,
-                            to: isOutgoing ? call.peerJid : '',
-                            body: `${isVideo ? '📹' : '📞'} Llamada ${isVideo ? 'de video' : 'de voz'}`,
-                            type: 'call_log',
-                            fromMe: isOutgoing,
-                            timestamp: timestamp,
-                            phoneNumber: phoneNumber,
-                            contactName: contactName || phoneNumber,
-                            senderName: isOutgoing ? 'Tú' : (contactName || phoneNumber),
-                            isGroup: isGroup,
-                            groupName: null,
-                            callMetadata: {
-                                isVideo: isVideo,
-                                direction: isOutgoing ? 'outbound' : 'inbound',
-                                duration: 0 // No disponible para llamadas no contestadas
-                            }
-                        }
-                    };
-
-
-                    console.log(`[Call] Sending ${isOutgoing ? 'OUTGOING' : 'INCOMING'} call event to webhook - Phone: ${phoneNumber}, Type: ${isVideo ? 'VIDEO' : 'VOICE'}`);
-                    sendWebhook(webhookUrl, 'on_message', payload);
-
-
-                } catch (error) {
-                    console.error(`[Call] Error processing incoming call:`, error);
-                }
-            });
-        } else {
-            console.warn(`[Call] onIncomingCall is NOT available in this WPPConnect version. Only historical call_log messages will be processed.`);
-        }
-
 
         if (!responseSent) {
             const state = await client.getConnectionState();
@@ -1590,6 +1117,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
 
     } catch (err) {
         console.error('Error creating session:', err);
+        sendLogEntry(webhookUrl, sessionName, 'error', `Error creating session: ${err?.message || err}`);
         sendError(500, err.message);
         sessions.delete(sessionName);
         removeSessionFromFile(sessionName);
@@ -1703,10 +1231,14 @@ app.post('/api/session/:session/send-message', async (req, res) => {
 
         const result = await sessionData.client.sendText(destination, message);
         console.log(`[Send] Message sent successfully to ${destination}. MsgID: ${result?.id}`);
+        const webhookUrl = sessionData.webhookUrl;
+        if (webhookUrl) sendLogEntry(webhookUrl, session, 'info', `Mensaje enviado a ${destination.replace('@c.us', '').replace('@g.us', '')}`);
 
         res.json({ success: true, message: 'Message sent', messageId: result?.id, to: destination });
     } catch (error) {
         console.error(`Error sending message on session ${session}:`, error);
+        const webhookUrl = sessionData?.webhookUrl;
+        if (webhookUrl) sendLogEntry(webhookUrl, session, 'error', `Error enviando mensaje: ${error?.message || error}`);
         res.status(500).json({ error: error.message });
     }
 });
@@ -1850,4 +1382,3 @@ const cleanupAllSessions = async () => {
 
 process.on('SIGINT', cleanupAllSessions);
 process.on('SIGTERM', cleanupAllSessions);
-
