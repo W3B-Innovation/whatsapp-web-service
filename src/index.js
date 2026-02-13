@@ -564,7 +564,7 @@ function pipeConsoleToCrm() {
                 if (!webhookUrl) return;
                 const levelMap = { log: 'info', info: 'info', warn: 'warn', error: 'error' };
                 sendLogEntry(webhookUrl, sessionName, levelMap[level] || 'info', text.slice(0, 2000));
-            } catch (_) {}
+            } catch (_) { }
         };
     });
 }
@@ -767,7 +767,7 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                     }, 60000);
                 }
             },
-            statusFind: (statusSession, session) => {
+            statusFind: async (statusSession, session) => {
                 console.log(`Status change for ${sessionName}: ${statusSession}`);
                 sendLogEntry(webhookUrl, sessionName, 'info', `Status change: ${statusSession}`);
                 if (statusSession === 'notLogged' || statusSession === 'disconnectedMobile') {
@@ -775,11 +775,22 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
                 }
                 sessionData.status = statusSession;
 
-                sendWebhook(webhookUrl, 'status_change', { session: sessionName, status: statusSession });
-
+                let accountPhone = null;
                 if (statusSession === 'inChat' || statusSession === 'isLogged') {
                     sessionData.qr = null;
+                    try {
+                        const wid = await client.getWid();
+                        accountPhone = wid ? wid.replace(/@c\.us|@s\.whatsapp\.net|@lid/g, '').split(':')[0] : null;
+                    } catch (e) {
+                        console.warn(`[Status] Could not get WID: ${e.message}`);
+                    }
                 }
+
+                sendWebhook(webhookUrl, 'status_change', {
+                    session: sessionName,
+                    status: statusSession,
+                    accountPhone
+                });
             },
             headless: true,
             devtools: false,
@@ -838,12 +849,25 @@ const startWppSession = async (sessionName, webhookUrl, res = null) => {
         // Cuando la interfaz pasa a NORMAL (conectado), notificar inChat para que el CRM muestre verde.
         // wppconnect no llama statusFind('inChat') después de qrReadSuccess, y a veces emite
         // MAIN (NORMAL) antes de que registremos el listener, por eso añadimos fallback con setTimeout.
-        const trySetInChat = () => {
+        const trySetInChat = async () => {
             if (sessionData.status === 'inChat') return;
             sessionData.status = 'inChat';
             sessionData.qr = null;
             console.log(`Status change for ${sessionName}: inChat`);
-            sendWebhook(webhookUrl, 'status_change', { session: sessionName, status: 'inChat' });
+
+            let accountPhone = null;
+            try {
+                const wid = await client.getWid();
+                accountPhone = wid ? wid.replace(/@c\.us|@s\.whatsapp\.net|@lid/g, '').split(':')[0] : null;
+            } catch (e) {
+                console.warn(`[Status] Could not get WID in trySetInChat: ${e.message}`);
+            }
+
+            sendWebhook(webhookUrl, 'status_change', {
+                session: sessionName,
+                status: 'inChat',
+                accountPhone
+            });
             sendLogEntry(webhookUrl, sessionName, 'info', 'Status change: inChat');
         };
         if (typeof client.onInterfaceChange === 'function') {
