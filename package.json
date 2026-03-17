@@ -1,15 +1,16 @@
 {
   "name": "whatsapp-web-sync-service",
   "version": "1.0.0",
-  "description": "Microservicio Node.js que sincroniza mensajes de WhatsApp Web con el AI-CRM usando WPPConnect. Permite gestionar múltiples sesiones de WhatsApp para diferentes colaboradores.",
+  "type": "module",
+  "description": "Microservicio Node.js que sincroniza mensajes de WhatsApp Web con el AI-CRM usando Baileys. Permite gestionar múltiples sesiones y enviar QR al CRM.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon --watch src --ignore tokens --ignore node_modules --ext js --delay 2000 src/index.js"
+    "dev": "nodemon --watch src --ignore auth_baileys --ignore node_modules --ext js --delay 2000 src/index.js"
   },
   "keywords": [
     "whatsapp",
-    "wppconnect",
+    "baileys",
     "crm",
     "sync",
     "microservice"
@@ -17,11 +18,14 @@
   "author": "W3B Innovation",
   "license": "UNLICENSED",
   "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "@wppconnect-team/wppconnect": "^1.37.9",
+    "baileys": "^7.0.0-rc.9",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "node-fetch": "^2.6.7",
     "nodemon": "^3.1.11",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "tree-kill": "^1.2.2"
   }
