@@ -1,3 +1,4 @@
+import 'dotenv/config'
 import express from 'express'
 import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket } from './whatsappService.js'
 
