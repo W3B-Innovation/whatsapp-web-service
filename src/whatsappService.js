@@ -123,11 +123,9 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
             }
             if (c.lid) {
                 const mapLids = sessions[accountId].contactLids
-                mapLids[c.lid] = c.id
-                const rawLid = c.lid.replace(/@lid/g, '')
-                if (rawNum && rawLid) {
-                    mapLids[rawLid] = rawNum
-                }
+                const lid = String(c.lid).split('@')[0]
+                mapLids[lid] = rawNum || c.id.split('@')[0]
+                console.log(`[${accountId}] 🔗 Mapeo LID detectado: ${lid} -> ${mapLids[lid]}`)
             }
         }
     }
@@ -470,7 +468,13 @@ export async function sendMessage(accountId = 'default', number, message) {
         throw new Error(`WhatsApp no está conectado para la cuenta ${accountId}`)
     }
 
-    const jid = number.includes('@') ? number : `${number}@s.whatsapp.net`
+    // Si el número es largo y no tiene @, probablemente sea un LID
+    let jid = number.includes('@') ? number : `${number}@s.whatsapp.net`
+    if (!number.includes('@') && number.length >= 15 && !number.startsWith('521')) { // Regla heurística para LIDs
+        jid = `${number}@lid`
+    }
+    
+    console.log(`[${accountId}] Enviando a JID resolved: ${jid}`)
     return await session.sock.sendMessage(jid, { text: message })
 }
 
