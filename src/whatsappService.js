@@ -131,6 +131,12 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
     }
     sock.ev.on('contacts.upsert', mergeContactNames)
     sock.ev.on('contacts.update', mergeContactNames)
+    sock.ev.on('messaging-history.set', ({ contacts }) => {
+        if (contacts && contacts.length > 0) {
+            console.log(`[${accountId}] 📥 Sincronizando ${contacts.length} contactos desde historial...`)
+            mergeContactNames(contacts)
+        }
+    })
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update
@@ -420,6 +426,7 @@ export async function handleMessages(accountId, { messages, type }) {
                         })(),
                         messageId: msg.key.id,
                         profilePicUrl,
+                        contextInfo: msg.message?.[messageType]?.contextInfo || msg.message?.extendedTextMessage?.contextInfo || null,
                         media: hasMedia ? {
                             base64: mediaBase64,
                             mimetype,
