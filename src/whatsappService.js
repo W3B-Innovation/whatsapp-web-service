@@ -408,13 +408,31 @@ export async function handleMessages(accountId, { messages, type }) {
         
         if (isLid || (cleanNumber && cleanNumber.length > 13)) {
             const rawLid = cleanNumber
-            const realPhone = sessions[accountId]?.contactLids?.[rawLid]
+            let realPhone = sessions[accountId]?.contactLids?.[rawLid]
+            
+            // Si no tenemos mapeo, intentar resolverlo dinámicamente con WhatsApp
+            if (!realPhone && sessions[accountId]?.sock) {
+                try {
+                    console.log(`[${accountId}] 🔍 Intentando resolver LID desconocido dinámicamente: ${rawLid}...`)
+                    const [result] = await sessions[accountId].sock.onWhatsApp(remoteJid)
+                    if (result && result.exists) {
+                        realPhone = result.jid.split('@')[0].split(':')[0]
+                        if (realPhone && /^\d+$/.test(realPhone)) {
+                            sessions[accountId].contactLids[rawLid] = realPhone
+                            console.log(`[${accountId}] ✅ RESOLUCIÓN DINÁMICA EXITOSA: ${rawLid} -> ${realPhone}`)
+                        }
+                    }
+                } catch (err) {
+                    console.warn(`[${accountId}] Error en resolución dinámica de LID:`, err.message)
+                }
+            }
+
             if (realPhone) {
-                console.log(`[${accountId}] 💥 RESOLUCIÓN LID EXITOSA (${fromMe ? 'Saliente' : 'Entrante'}): ${rawLid} -> ${realPhone}`)
+                console.log(`[${accountId}] 💥 RESOLUCIÓN LID APLICADA (${fromMe ? 'Saliente' : 'Entrante'}): ${rawLid} -> ${realPhone}`)
                 cleanNumber = realPhone
                 remoteJid = `${realPhone}@s.whatsapp.net` // Forzar transmutación
             } else if (cleanNumber && cleanNumber.length > 13) {
-                console.warn(`[${accountId}] ⚠️  Detectado posible LID sin mapeo: ${cleanNumber}`)
+                console.warn(`[${accountId}] ⚠️  No se pudo resolver el LID: ${cleanNumber}`)
             }
         }
 
