@@ -51,12 +51,17 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
             lastQr: null,
             companyId: companyId,
             contactNamesByJid: {}, // Caché: JID -> nombre del contacto
+            contactLids: {},
         }
-    } else if (companyId) {
-        sessions[accountId].companyId = companyId
-        if (!sessions[accountId].contactNamesByJid) sessions[accountId].contactNamesByJid = {}
-        if (!sessions[accountId].contactLids) sessions[accountId].contactLids = {}
     }
+    
+    // SIEMPRE actualizar companyId si se provee, para no perderlo en reconexiones
+    if (companyId) {
+        sessions[accountId].companyId = companyId
+    }
+    
+    if (!sessions[accountId].contactNamesByJid) sessions[accountId].contactNamesByJid = {}
+    if (!sessions[accountId].contactLids) sessions[accountId].contactLids = {}
 
     // Bloquear si ya hay una conexión activa o en progreso
     const currentStatus = sessions[accountId].connectionStatus
@@ -467,6 +472,12 @@ export async function handleMessages(accountId, { messages, type }) {
 
 export function getSocket(accountId = 'default') {
     return sessions[accountId]?.sock || null
+}
+
+export function setStatus(accountId = 'default', status) {
+    if (sessions[accountId]) {
+        sessions[accountId].connectionStatus = status
+    }
 }
 
 export function getStatus(accountId = 'default') {
