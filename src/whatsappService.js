@@ -7,7 +7,51 @@ import fetch from 'node-fetch'
 const sessions = {}
 const instanceId = Math.random().toString(36).substring(7)
 const sessionSuffix = Date.now().toString().slice(-4)
+const SESSIONS_FILE = './sessions.json'
 console.log(`[System] Instancia: ${instanceId} | Sufijo: ${sessionSuffix}`)
+
+// Cargar sesiones persistentes (solo metadata como companyId)
+function loadPersistentSessions() {
+    try {
+        if (fs.existsSync(SESSIONS_FILE)) {
+            const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'))
+            for (const id in data) {
+                if (!sessions[id]) {
+                    sessions[id] = { 
+                        sock: null, 
+                        connectionStatus: 'disconnected', 
+                        lastQr: null, 
+                        contactNamesByJid: {}, 
+                        contactLids: {},
+                        ...data[id] 
+                    }
+                } else {
+                    Object.assign(sessions[id], data[id])
+                }
+            }
+            console.log(`[System] ${Object.keys(data).length} sesiones cargadas desde disco.`)
+        }
+    } catch (e) {
+        console.error('[System] Error cargando sesiones persistentes:', e.message)
+    }
+}
+
+function savePersistentSessions() {
+    try {
+        const metadata = {}
+        for (const id in sessions) {
+            metadata[id] = {
+                companyId: sessions[id].companyId,
+                number: sessions[id].number
+            }
+        }
+        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(metadata, null, 2))
+    } catch (e) {
+        console.error('[System] Error guardando sesiones persistentes:', e.message)
+    }
+}
+
+loadPersistentSessions()
 
 const globalStats = {
     messagesReceived: 0,
@@ -58,6 +102,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
     // SIEMPRE actualizar companyId si se provee, para no perderlo en reconexiones
     if (companyId) {
         sessions[accountId].companyId = companyId
+        savePersistentSessions()
     }
     
     if (!sessions[accountId].contactNamesByJid) sessions[accountId].contactNamesByJid = {}
@@ -220,6 +265,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
             sessions[accountId].connectionStatus = 'open'
             sessions[accountId].lastQr = null
             sessions[accountId].number = cleanNumber
+            savePersistentSessions()
             console.log(`[${accountId}] ✅ ¡Conectado exitosamente! Número: ${cleanNumber}`)
         }
     })
