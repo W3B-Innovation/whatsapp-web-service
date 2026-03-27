@@ -475,7 +475,9 @@ export function getSocket(accountId = 'default') {
 }
 
 export function setStatus(accountId = 'default', status) {
-    if (sessions[accountId]) {
+    if (!sessions[accountId]) {
+        sessions[accountId] = { sock: null, connectionStatus: status, lastQr: null, contactNamesByJid: {}, contactLids: {} }
+    } else {
         sessions[accountId].connectionStatus = status
     }
 }
@@ -506,14 +508,6 @@ export async function sendMessage(accountId = 'default', number, message) {
     
     console.log(`[${accountId}] Enviando a JID resolved: ${jid}`)
     return await session.sock.sendMessage(jid, { text: message })
-}
-
-export function setStatus(accountId = 'default', status) {
-    if (!sessions[accountId]) {
-        sessions[accountId] = { sock: null, connectionStatus: status, lastQr: null }
-    } else {
-        sessions[accountId].connectionStatus = status
-    }
 }
 
 export async function logout(accountId = 'default') {
