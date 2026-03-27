@@ -335,6 +335,7 @@ export async function handleMessageUpdates(accountId, updates) {
                     messageId,
                     status: statusString,
                     remoteJid,
+                    cleanNumber,
                     timestamp: Date.now() / 1000
                 })
             })
@@ -463,19 +464,14 @@ export async function handleMessages(accountId, { messages, type }) {
                     body: JSON.stringify({
                         accountId,
                         companyId,
-                        accountPhone: sessions[accountId]?.number || null,
                         fromMe,
                         remoteJid,
+                        cleanNumber,
                         text,
                         timestamp: msg.messageTimestamp,
-                        // pushName del protocolo WA = nombre del REMITENTE (quien envía).
-                        // Entrante: remitente = contacto → pushName correcto ✓
-                        // Saliente: remitente = nosotros → pushName = nombre de nuestra cuenta ✗
-                        // Solución: para salientes buscamos en el caché de contactos.
                         pushName: (() => {
                             const map = sessions[accountId]?.contactNamesByJid || {}
                             if (!fromMe) {
-                                // Entrante: guardar en caché y usar directamente
                                 const inboundName = msg.pushName && String(msg.pushName).trim()
                                 if (inboundName) {
                                     map[remoteJid] = inboundName
@@ -483,18 +479,15 @@ export async function handleMessages(accountId, { messages, type }) {
                                 }
                                 return inboundName || null
                             } else {
-                                // Saliente: buscar nombre del destinatario en caché
                                 return map[remoteJid] || map[`${cleanNumber}@s.whatsapp.net`] || null
                             }
                         })(),
                         messageId: msg.key.id,
-                        profilePicUrl,
-                        contextInfo: msg.message?.[messageType]?.contextInfo || msg.message?.extendedTextMessage?.contextInfo || null,
                         media: hasMedia ? {
-                            base64: mediaBase64,
+                            type: messageType,
                             mimetype,
                             fileName,
-                            type: messageType
+                            base64: mediaBase64
                         } : null
                     })
                 })
