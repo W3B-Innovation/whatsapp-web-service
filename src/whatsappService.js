@@ -113,19 +113,28 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
     function mergeContactNames(contactList) {
         if (!Array.isArray(contactList)) return
         const map = sessions[accountId].contactNamesByJid
+        const mapLids = sessions[accountId].contactLids
+        
         for (const c of contactList) {
+            const jid = c.id || ''
             const name = (c.name && String(c.name).trim()) || (c.notify && String(c.notify).trim()) || ''
-            if (!name || !c.id) continue
-            map[c.id] = name
-            const rawNum = c.id.replace(/@s\.whatsapp\.net|@c\.us|@lid/g, '')
-            if (rawNum && /^\d+$/.test(rawNum)) {
-                map[`${rawNum}@s.whatsapp.net`] = name
+            
+            if (name && jid) {
+                map[jid] = name
+                const rawNum = jid.split('@')[0].split(':')[0]
+                if (rawNum && /^\d+$/.test(rawNum) && !jid.includes('@lid')) {
+                    map[`${rawNum}@s.whatsapp.net`] = name
+                }
             }
-            if (c.lid) {
-                const mapLids = sessions[accountId].contactLids
+
+            // Capturar mapeo LID -> Real Phone
+            if (c.lid && jid && !jid.includes('@lid')) {
                 const lid = String(c.lid).split('@')[0]
-                mapLids[lid] = rawNum || c.id.split('@')[0]
-                console.log(`[${accountId}] 🔗 Mapeo LID detectado: ${lid} -> ${mapLids[lid]}`)
+                const realPhone = jid.split('@')[0].split(':')[0]
+                if (realPhone && /^\d+$/.test(realPhone)) {
+                    mapLids[lid] = realPhone
+                    console.log(`[${accountId}] 🔗 LID MAPPING: ${lid} -> ${realPhone} (via contact update)`)
+                }
             }
         }
     }
@@ -235,12 +244,15 @@ export async function handleMessageUpdates(accountId, updates) {
         const status = update.update.status // 1: pendiente, 2: enviado, 3: entregado, 4: leído, 5: error
 
         // Translate LID to real number if available in memory mapping
+        let cleanNumber = remoteJid ? remoteJid.split('@')[0].split(':')[0] : 'Desconocido'
         const isLid = remoteJid && remoteJid.includes('@lid')
+        
         if (isLid) {
             const rawLid = remoteJid.split('@')[0]
             const realPhone = sessions[accountId]?.contactLids?.[rawLid]
             if (realPhone) {
-                remoteJid = `${realPhone}@s.whatsapp.net` // Se fuerza a usar el número real
+                cleanNumber = realPhone
+                remoteJid = `${realPhone}@s.whatsapp.net` // Forzar transmutación
             }
         }
 
@@ -329,18 +341,18 @@ export async function handleMessages(accountId, { messages, type }) {
         }
 
         // Translate LID to real number if available in memory mapping
+        let cleanNumber = remoteJid ? remoteJid.split('@')[0].split(':')[0] : 'Desconocido'
         const isLid = remoteJid && remoteJid.includes('@lid')
+        
         if (isLid) {
             const rawLid = remoteJid.split('@')[0]
             const realPhone = sessions[accountId]?.contactLids?.[rawLid]
             if (realPhone) {
-                console.log(`[${accountId}] 🔄 Traduciendo alias LID ${rawLid} a su número real: ${realPhone}`)
-                remoteJid = `${realPhone}@s.whatsapp.net` // Se fuerza a usar el número real
+                console.log(`[${accountId}] 💥 RESOLUCIÓN LID EXITOSA: ${rawLid} -> ${realPhone}`)
+                cleanNumber = realPhone
+                remoteJid = `${realPhone}@s.whatsapp.net` // Forzar transmutación
             }
         }
-
-        // Extraer solo el número (limpiar @s.whatsapp.net, @lid, etc.)
-        const cleanNumber = remoteJid ? remoteJid.split('@')[0].split(':')[0] : 'Desconocido'
 
         // Obtener foto de perfil (async, pero no bloqueante para el flujo principal si falla)
         const profilePicUrl = await getProfilePic(accountId, remoteJid)
