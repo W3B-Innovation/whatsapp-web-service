@@ -183,6 +183,10 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
             
             if (lid && realPhone && /^\d+$/.test(realPhone)) {
                 mapLids[lid] = realPhone
+                // También mapear el número largo sin @lid por si acaso llega así en el remoteJid
+                if (lid.length > 13) {
+                    mapLids[lid] = realPhone
+                }
                 console.log(`[${accountId}] 🔗 LID MAPPING: ${lid} -> ${realPhone} (via contact update)`)
             }
         }
@@ -402,13 +406,15 @@ export async function handleMessages(accountId, { messages, type }) {
         let cleanNumber = remoteJid ? remoteJid.split('@')[0].split(':')[0] : 'Desconocido'
         const isLid = remoteJid && remoteJid.includes('@lid')
         
-        if (isLid) {
-            const rawLid = remoteJid.split('@')[0]
+        if (isLid || (cleanNumber && cleanNumber.length > 13)) {
+            const rawLid = cleanNumber
             const realPhone = sessions[accountId]?.contactLids?.[rawLid]
             if (realPhone) {
                 console.log(`[${accountId}] 💥 RESOLUCIÓN LID EXITOSA (${fromMe ? 'Saliente' : 'Entrante'}): ${rawLid} -> ${realPhone}`)
                 cleanNumber = realPhone
                 remoteJid = `${realPhone}@s.whatsapp.net` // Forzar transmutación
+            } else if (cleanNumber && cleanNumber.length > 13) {
+                console.warn(`[${accountId}] ⚠️  Detectado posible LID sin mapeo: ${cleanNumber}`)
             }
         }
 
