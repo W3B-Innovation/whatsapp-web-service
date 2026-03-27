@@ -1,4 +1,4 @@
-import { DisconnectReason, makeWASocket, useMultiFileAuthState, downloadMediaMessage, fetchLatestWaWebVersion } from '@whiskeysockets/baileys'
+import { DisconnectReason, makeWASocket, useMultiFileAuthState, downloadMediaMessage, fetchLatestWaWebVersion, isPnUser } from '@whiskeysockets/baileys'
 import pino from 'pino'
 import fs from 'fs'
 import fetch from 'node-fetch'
@@ -158,6 +158,16 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
     if (!sessions[accountId].contactLids) sessions[accountId].contactLids = {}
     sock.ev.on('creds.update', saveCreds)
 
+    // Baileys v7.0.0+: Escuchar actualizaciones de mapeo LID <-> PN
+    sock.ev.on('lid-mapping.update', (mappings) => {
+        for (const { lid, pn } of mappings) {
+            const rawLid = lid.split('@')[0]
+            const rawPn = pn.split('@')[0]
+            sessions[accountId].contactLids[rawLid] = rawPn
+            console.log(`[${accountId}] 🔗 LID MAPPING (Protocol): ${rawLid} -> ${rawPn}`)
+        }
+    })
+
     // Poblar caché de nombres desde la agenda del dispositivo vinculado
     // Esto permite resolver el nombre del contacto en mensajes salientes
     function mergeContactNames(contactList) {
@@ -166,28 +176,24 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
         const mapLids = sessions[accountId].contactLids
         
         for (const c of contactList) {
-            const jid = c.id || ''
+            const jid = c.id || c.jid || ''
             const name = (c.name && String(c.name).trim()) || (c.notify && String(c.notify).trim()) || ''
             
             if (name && jid) {
-                map[jid] = name
+                sessions[accountId].contactNamesByJid[jid] = name
                 const rawNum = jid.split('@')[0].split(':')[0]
-                if (rawNum && /^\d+$/.test(rawNum) && !jid.includes('@lid')) {
-                    map[`${rawNum}@s.whatsapp.net`] = name
+                if (rawNum && /^\d+$/.test(rawNum) && isPnUser(jid)) {
+                    sessions[accountId].contactNamesByJid[`${rawNum}@s.whatsapp.net`] = name
                 }
             }
 
-            // Capturar mapeo LID -> Real Phone
+            // Capturar mapeo LID -> Real Phone (Baileys v7 usa .phoneNumber o .lid)
             const lid = c.lid ? String(c.lid).split('@')[0] : (jid.includes('@lid') ? jid.split('@')[0] : null)
-            const realPhone = !jid.includes('@lid') ? jid.split('@')[0].split(':')[0] : null
+            const realPhone = c.phoneNumber ? String(c.phoneNumber).split(':')[0] : (!jid.includes('@lid') && isPnUser(jid) ? jid.split('@')[0].split(':')[0] : null)
             
             if (lid && realPhone && /^\d+$/.test(realPhone)) {
-                mapLids[lid] = realPhone
-                // También mapear el número largo sin @lid por si acaso llega así en el remoteJid
-                if (lid.length > 13) {
-                    mapLids[lid] = realPhone
-                }
-                console.log(`[${accountId}] 🔗 LID MAPPING: ${lid} -> ${realPhone} (via contact update)`)
+                sessions[accountId].contactLids[lid] = realPhone
+                console.log(`[${accountId}] 🔗 LID MAPPING (Contact): ${lid} -> ${realPhone}`)
             }
         }
     }
@@ -298,15 +304,20 @@ export async function handleMessageUpdates(accountId, updates) {
         const status = update.update.status // 1: pendiente, 2: enviado, 3: entregado, 4: leído, 5: error
 
         // Translate LID to real number if available in memory mapping
+        // Baileys v7.0.0+ LID Resolution
         let cleanNumber = remoteJid ? remoteJid.split('@')[0].split(':')[0] : 'Desconocido'
         const isLid = remoteJid && remoteJid.includes('@lid')
         
         if (isLid) {
             const rawLid = remoteJid.split('@')[0]
-            const realPhone = sessions[accountId]?.contactLids?.[rawLid]
-            if (realPhone) {
-                cleanNumber = realPhone
-                remoteJid = `${realPhone}@s.whatsapp.net` // Forzar transmutación
+            // Intentar resolución nativa vía signalRepository
+            const nativePn = await sessions[accountId]?.sock?.signalRepository?.lidMapping?.getPNForLID(remoteJid)
+            const mappedPn = nativePn ? nativePn.split('@')[0] : sessions[accountId]?.contactLids?.[rawLid]
+            
+            if (mappedPn) {
+                cleanNumber = mappedPn
+                remoteJid = `${mappedPn}@s.whatsapp.net`
+                console.log(`[${accountId}] 💥 LID RESOLVED (Native/Mem): ${rawLid} -> ${mappedPn}`)
             }
         }
 
@@ -402,21 +413,25 @@ export async function handleMessages(accountId, { messages, type }) {
         const myJid = sessions[accountId]?.sock?.user?.id?.split(':')[0] + '@s.whatsapp.net'
         const isSelfChat = remoteJid === myJid
 
-        // Translate LID to real number if available
+        // Baileys v7.0.0+ LID Resolution
         let cleanNumber = remoteJid ? remoteJid.split('@')[0].split(':')[0] : 'Desconocido'
         const isLid = remoteJid && remoteJid.includes('@lid')
         
         if (isLid || (cleanNumber && cleanNumber.length > 13)) {
             const rawLid = cleanNumber
-            let realPhone = sessions[accountId]?.contactLids?.[rawLid]
+            const fullLidJid = isLid ? remoteJid : `${rawLid}@lid`
             
-            // Si no tenemos mapeo, intentar resolverlo dinámicamente con WhatsApp
+            // 1. Intentar resolución nativa (v7 signal repo)
+            const nativePn = await sessions[accountId]?.sock?.signalRepository?.lidMapping?.getPNForLID(fullLidJid)
+            let realPhone = nativePn ? nativePn.split('@')[0] : sessions[accountId]?.contactLids?.[rawLid]
+            
+            // 2. Si no tenemos mapeo, intentar resolverlo dinámicamente
             if (!realPhone && sessions[accountId]?.sock) {
                 try {
                     console.log(`[${accountId}] 🔍 Intentando resolver LID desconocido dinámicamente: ${rawLid}...`)
-                    const [result] = await sessions[accountId].sock.onWhatsApp(remoteJid)
-                    if (result && result.exists) {
-                        realPhone = result.jid.split('@')[0].split(':')[0]
+                    const results = await sessions[accountId].sock.onWhatsApp(fullLidJid)
+                    if (results && results[0]?.exists) {
+                        realPhone = results[0].jid.split('@')[0].split(':')[0]
                         if (realPhone && /^\d+$/.test(realPhone)) {
                             sessions[accountId].contactLids[rawLid] = realPhone
                             console.log(`[${accountId}] ✅ RESOLUCIÓN DINÁMICA EXITOSA: ${rawLid} -> ${realPhone}`)
@@ -430,7 +445,7 @@ export async function handleMessages(accountId, { messages, type }) {
             if (realPhone) {
                 console.log(`[${accountId}] 💥 RESOLUCIÓN LID APLICADA (${fromMe ? 'Saliente' : 'Entrante'}): ${rawLid} -> ${realPhone}`)
                 cleanNumber = realPhone
-                remoteJid = `${realPhone}@s.whatsapp.net` // Forzar transmutación
+                remoteJid = `${realPhone}@s.whatsapp.net`
             } else if (cleanNumber && cleanNumber.length > 13) {
                 console.warn(`[${accountId}] ⚠️  No se pudo resolver el LID: ${cleanNumber}`)
             }
@@ -589,7 +604,9 @@ export async function sendMessage(accountId = 'default', number, message) {
         jid = `${number}@lid`
     }
     
-    console.log(`[${accountId}] Enviando a JID resolved: ${jid}`)
+    // Baileys v7+: Usar isPnUser para validación lógica
+    const isPn = isPnUser(jid)
+    console.log(`[${accountId}] Enviando a JID resolved: ${jid} (isPn: ${isPn})`)
     return await session.sock.sendMessage(jid, { text: message })
 }
 
