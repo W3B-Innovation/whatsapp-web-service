@@ -400,7 +400,7 @@ export async function handleMessages(accountId, { messages, type }) {
             const rawLid = remoteJid.split('@')[0]
             const realPhone = sessions[accountId]?.contactLids?.[rawLid]
             if (realPhone) {
-                console.log(`[${accountId}] 💥 RESOLUCIÓN LID EXITOSA: ${rawLid} -> ${realPhone}`)
+                console.log(`[${accountId}] 💥 RESOLUCIÓN LID EXITOSA (${fromMe ? 'Saliente' : 'Entrante'}): ${rawLid} -> ${realPhone}`)
                 cleanNumber = realPhone
                 remoteJid = `${realPhone}@s.whatsapp.net` // Forzar transmutación
             }
@@ -471,16 +471,17 @@ export async function handleMessages(accountId, { messages, type }) {
                         timestamp: msg.messageTimestamp,
                         pushName: (() => {
                             const map = sessions[accountId]?.contactNamesByJid || {}
+                            const name = map[remoteJid] || map[`${cleanNumber}@s.whatsapp.net`]
+                            
                             if (!fromMe) {
                                 const inboundName = msg.pushName && String(msg.pushName).trim()
                                 if (inboundName) {
                                     map[remoteJid] = inboundName
                                     map[`${cleanNumber}@s.whatsapp.net`] = inboundName
+                                    return inboundName
                                 }
-                                return inboundName || null
-                            } else {
-                                return map[remoteJid] || map[`${cleanNumber}@s.whatsapp.net`] || null
                             }
+                            return name || (fromMe ? null : msg.pushName) || null
                         })(),
                         messageId: msg.key.id,
                         media: hasMedia ? {
