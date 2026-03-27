@@ -178,13 +178,12 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
             }
 
             // Capturar mapeo LID -> Real Phone
-            if (c.lid && jid && !jid.includes('@lid')) {
-                const lid = String(c.lid).split('@')[0]
-                const realPhone = jid.split('@')[0].split(':')[0]
-                if (realPhone && /^\d+$/.test(realPhone)) {
-                    mapLids[lid] = realPhone
-                    console.log(`[${accountId}] 🔗 LID MAPPING: ${lid} -> ${realPhone} (via contact update)`)
-                }
+            const lid = c.lid ? String(c.lid).split('@')[0] : (jid.includes('@lid') ? jid.split('@')[0] : null)
+            const realPhone = !jid.includes('@lid') ? jid.split('@')[0].split(':')[0] : null
+            
+            if (lid && realPhone && /^\d+$/.test(realPhone)) {
+                mapLids[lid] = realPhone
+                console.log(`[${accountId}] 🔗 LID MAPPING: ${lid} -> ${realPhone} (via contact update)`)
             }
         }
     }
@@ -392,7 +391,14 @@ export async function handleMessages(accountId, { messages, type }) {
             continue
         }
 
-        // Translate LID to real number if available in memory mapping
+        // 1. DETERMINAR LA OTRA PARTE (The actual contact)
+        // En WA, el remoteJid de un chat individual SIEMPRE es el otro contacto,
+        // INCLUSO si el mensaje es fromMe: true.
+        // PEEEERO, si mandas un mensaje A TI MISMO, remoteJid == tu numero.
+        const myJid = sessions[accountId]?.sock?.user?.id?.split(':')[0] + '@s.whatsapp.net'
+        const isSelfChat = remoteJid === myJid
+
+        // Translate LID to real number if available
         let cleanNumber = remoteJid ? remoteJid.split('@')[0].split(':')[0] : 'Desconocido'
         const isLid = remoteJid && remoteJid.includes('@lid')
         
@@ -404,6 +410,12 @@ export async function handleMessages(accountId, { messages, type }) {
                 cleanNumber = realPhone
                 remoteJid = `${realPhone}@s.whatsapp.net` // Forzar transmutación
             }
+        }
+
+        // Si es un chat contigo mismo o el microservicio se perdió, ignorar para evitar duplicados infinitos
+        if (isSelfChat && fromMe) {
+            console.warn(`[${accountId}] Ignorando mensaje saliente a uno mismo para evitar bucle/duplicado.`)
+            continue
         }
 
         // Obtener foto de perfil (async, pero no bloqueante para el flujo principal si falla)
@@ -471,17 +483,24 @@ export async function handleMessages(accountId, { messages, type }) {
                         timestamp: msg.messageTimestamp,
                         pushName: (() => {
                             const map = sessions[accountId]?.contactNamesByJid || {}
-                            const name = map[remoteJid] || map[`${cleanNumber}@s.whatsapp.net`]
+                            
+                            // Siempre intentar sacar el nombre del caché usando el JID del OTRO (destinatario/remitente)
+                            const cachedName = map[remoteJid] || map[`${cleanNumber}@s.whatsapp.net`]
                             
                             if (!fromMe) {
+                                // Entrante: El mensaje trae el pushName del que envía (el contacto)
                                 const inboundName = msg.pushName && String(msg.pushName).trim()
                                 if (inboundName) {
                                     map[remoteJid] = inboundName
                                     map[`${cleanNumber}@s.whatsapp.net`] = inboundName
                                     return inboundName
                                 }
+                                return cachedName || null
+                            } else {
+                                // Saliente: El pushName en el mensaje eres TÚ. 
+                                // DEBEMOS ignorarlo y usar el nombre del destinatario que tengamos en caché.
+                                return cachedName || null
                             }
-                            return name || (fromMe ? null : msg.pushName) || null
                         })(),
                         messageId: msg.key.id,
                         media: hasMedia ? {
