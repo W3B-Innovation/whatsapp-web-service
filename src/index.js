@@ -56,7 +56,7 @@ app.get('/status', (req, res) => {
 
 // Iniciar conexión manualmente para una cuenta específica
 app.post('/connect', async (req, res) => {
-    const { accountId = 'account-1', companyId } = req.body
+    const { accountId = 'account-1', companyId, browserName } = req.body
     const status = getStatus(accountId)
 
     if (status === 'open') {
@@ -67,7 +67,7 @@ app.post('/connect', async (req, res) => {
         return res.json({ message: `La conexión para ${accountId} ya está en proceso`, status })
     }
 
-    connectToWhatsApp(accountId, companyId).catch(err => {
+    connectToWhatsApp(accountId, companyId, browserName).catch(err => {
         console.error(`Error al conectar ${accountId}:`, err)
         setStatus(accountId, 'disconnected')
     })

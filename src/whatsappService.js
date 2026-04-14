@@ -86,7 +86,7 @@ export function getGlobalStats(companyId = null) {
     }
 }
 
-export async function connectToWhatsApp(accountId = 'default', companyId = null) {
+export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM') {
     // Inicializar sesión si no existe
     if (!sessions[accountId]) {
         sessions[accountId] = {
@@ -94,16 +94,17 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
             connectionStatus: 'disconnected',
             lastQr: null,
             companyId: companyId,
+            browserName: browserName, // Guardar preferencia de nombre
             contactNamesByJid: {}, // Caché: JID -> nombre del contacto
             contactLids: {},
         }
     }
 
-    // SIEMPRE actualizar companyId si se provee, para no perderlo en reconexiones
-    if (companyId) {
-        sessions[accountId].companyId = companyId
-        savePersistentSessions()
-    }
+    // SIEMPRE actualizar companyId y browserName si se proveen
+    if (companyId) sessions[accountId].companyId = companyId
+    if (browserName) sessions[accountId].browserName = browserName
+    
+    savePersistentSessions()
 
     if (!sessions[accountId].contactNamesByJid) sessions[accountId].contactNamesByJid = {}
     if (!sessions[accountId].contactLids) sessions[accountId].contactLids = {}
@@ -116,7 +117,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
     }
 
     sessions[accountId].connectionStatus = 'connecting'
-    console.log(`[${accountId}] [MANUAL] Iniciando conexión...`)
+    console.log(`[${accountId}] [MANUAL] Iniciando conexión con nombre: ${sessions[accountId].browserName}...`)
 
     // Limpieza de carpetas corruptas (sin creds.json)
     const authFolder = `auth_baileys_${accountId}`
@@ -137,7 +138,6 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
     const { state, saveCreds } = await useMultiFileAuthState(authFolder)
 
     // Obtener la versión actual de WhatsApp Web
-    // Esto resuelve el error 405 causado por la versión hardcodeada en Baileys
     const { version, isLatest } = await fetchLatestWaWebVersion()
     console.log(`[${accountId}] Versión WA: ${version.join('.')} (isLatest: ${isLatest})`)
 
@@ -145,7 +145,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: ['Bitend AI CRM', 'Chrome', '1.0.0'],
+        browser: [sessions[accountId].browserName, 'Chrome', '1.0.0'],
         connectTimeoutMs: 60000,
         syncFullHistory: false,
         markOnlineOnConnect: false,
