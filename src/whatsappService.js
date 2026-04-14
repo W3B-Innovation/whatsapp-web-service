@@ -17,13 +17,13 @@ function loadPersistentSessions() {
             const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'))
             for (const id in data) {
                 if (!sessions[id]) {
-                    sessions[id] = { 
-                        sock: null, 
-                        connectionStatus: 'disconnected', 
-                        lastQr: null, 
-                        contactNamesByJid: {}, 
+                    sessions[id] = {
+                        sock: null,
+                        connectionStatus: 'disconnected',
+                        lastQr: null,
+                        contactNamesByJid: {},
                         contactLids: {},
-                        ...data[id] 
+                        ...data[id]
                     }
                 } else {
                     Object.assign(sessions[id], data[id])
@@ -98,13 +98,13 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
             contactLids: {},
         }
     }
-    
+
     // SIEMPRE actualizar companyId si se provee, para no perderlo en reconexiones
     if (companyId) {
         sessions[accountId].companyId = companyId
         savePersistentSessions()
     }
-    
+
     if (!sessions[accountId].contactNamesByJid) sessions[accountId].contactNamesByJid = {}
     if (!sessions[accountId].contactLids) sessions[accountId].contactLids = {}
 
@@ -174,11 +174,11 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
         if (!Array.isArray(contactList)) return
         const map = sessions[accountId].contactNamesByJid
         const mapLids = sessions[accountId].contactLids
-        
+
         for (const c of contactList) {
             const jid = c.id || c.jid || ''
             const name = (c.name && String(c.name).trim()) || (c.notify && String(c.notify).trim()) || ''
-            
+
             if (name && jid) {
                 sessions[accountId].contactNamesByJid[jid] = name
                 const rawNum = jid.split('@')[0].split(':')[0]
@@ -190,7 +190,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
             // Capturar mapeo LID -> Real Phone (Baileys v7 usa .phoneNumber o .lid)
             const lid = c.lid ? String(c.lid).split('@')[0] : (jid.includes('@lid') ? jid.split('@')[0] : null)
             const realPhone = c.phoneNumber ? String(c.phoneNumber).split(':')[0] : (!jid.includes('@lid') && isPnUser(jid) ? jid.split('@')[0].split(':')[0] : null)
-            
+
             if (lid && realPhone && /^\d+$/.test(realPhone)) {
                 sessions[accountId].contactLids[lid] = realPhone
                 console.log(`[${accountId}] 🔗 LID MAPPING (Contact): ${lid} -> ${realPhone}`)
@@ -279,6 +279,113 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null)
         }
     })
 
+    // Escuchar cambios en participantes de grupos (Entradas/Salidas)
+    sock.ev.on('group-participants.update', async (update) => {
+        const { id, participants, action } = update
+
+        if (action === 'add') {
+            const accountId = Object.keys(sessions).find(aid => sessions[aid].sock === sock) || 'unknown'
+            console.log(`[${accountId}] 👥 Nuevos participantes detectados en ${id}`)
+
+            let groupName = 'Grupo Desconocido'
+            try {
+                // Intentar obtener metadata fresca para el nombre del grupo
+                const metadata = await sock.groupMetadata(id)
+                groupName = metadata.subject || groupName
+                console.log(`[${accountId}] ✅ Procesando ingresos en el grupo: "${groupName}"`)
+            } catch (err) {
+                console.error(`[${accountId}] Error obteniendo metadata del grupo ${id}:`, err.message)
+                // Continuamos aunque falle el nombre, el ID se mantiene
+            }
+
+            // Mapear participantes para extraer número y buscar nombre en el caché si existe
+            const enrichedParticipants = (await Promise.all(participants.map(async (p) => {
+                const jid = (typeof p === 'string') ? p : (p.phoneNumber || p.id || '')
+                if (!jid) return null
+
+                let rawNum = jid.split('@')[0].split(':')[0]
+                const isLid = jid.includes('@lid')
+                const lidMap = sessions[accountId]?.contactLids || {}
+
+                // RESOLUCIÓN FORZADA AL ENTRAR
+                if (isLid || rawNum.length > 13) {
+                    if (lidMap[rawNum]) {
+                        rawNum = lidMap[rawNum]
+                    } else if (sock) {
+                        try {
+                            const results = await sock.onWhatsApp(jid)
+                            if (results && results[0]?.exists) {
+                                const resolvedPn = results[0].jid.split('@')[0].split(':')[0]
+                                if (resolvedPn && /^\d+$/.test(resolvedPn)) {
+                                    lidMap[rawNum] = resolvedPn
+                                    console.log(`[${accountId}] 🤝 Identidad resuelta al entrar: ${rawNum} -> ${resolvedPn}`)
+                                    rawNum = resolvedPn
+                                }
+                            }
+                        } catch (e) { }
+                    }
+                }
+
+                const contactMap = sessions[accountId]?.contactNamesByJid || {}
+                const cleanNumber = rawNum.replace(/^(\d{2})1(\d{10})$/, '$1$2')
+                const with1Number = rawNum.length === 12 ? rawNum.replace(/^(\d{2})(\d{10})$/, '$11$2') : rawNum
+
+                let userName = contactMap[jid] ||
+                    contactMap[`${rawNum}@s.whatsapp.net`] ||
+                    contactMap[`${cleanNumber}@s.whatsapp.net`] ||
+                    contactMap[`${with1Number}@s.whatsapp.net`] ||
+                    contactMap[rawNum] ||
+                    contactMap[cleanNumber]
+
+                if (!userName) {
+                    try {
+                        const metadata = await sock.groupMetadata(id)
+                        const part = metadata.participants.find(part =>
+                            part.id === jid || part.id.includes(cleanNumber) || part.id.includes(rawNum)
+                        )
+                        if (part && (part.name || part.notify)) userName = part.name || part.notify
+                    } catch (e) { }
+                }
+
+                console.log(`[${accountId}] 🔍 Integrante: ${rawNum} (${userName || 'Nuevo Usuario'})`)
+
+                return {
+                    phoneNumber: rawNum,
+                    userName: userName || 'Nuevo Usuario'
+                }
+            }))).filter(p => p !== null)
+
+            // Enviar exclusivamente a SoyAndrade vía Webhook
+            const soyAndradeWebhook = process.env.SOYANDRADE_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
+            const companyId = sessions[accountId]?.companyId || null
+
+            try {
+                console.log(`[${accountId}] 📡 Enviando lead de grupo a SoyAndrade: ${soyAndradeWebhook}`)
+                const response = await fetch(soyAndradeWebhook, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        type: 'group_join',
+                        accountId,
+                        companyId,
+                        groupId: id,
+                        groupName,
+                        participants: enrichedParticipants,
+                        timestamp: Date.now()
+                    })
+                })
+
+                if (response.ok) {
+                    console.log(`[${accountId}] ✅ Lead registrado con éxito en SoyAndrade.`)
+                } else {
+                    console.error(`[${accountId}] ⚠️  SoyAndrade respondió con error (${response.status})`)
+                }
+            } catch (err) {
+                console.error(`[${accountId}] ❌ Error conectando con el webhook de SoyAndrade:`, err.message)
+            }
+        }
+    })
+
     // Escuchar mensajes entrantes
     sock.ev.on('messages.upsert', async (upsert) => {
         handleMessages(accountId, upsert)
@@ -307,13 +414,13 @@ export async function handleMessageUpdates(accountId, updates) {
         // Baileys v7.0.0+ LID Resolution
         let cleanNumber = remoteJid ? remoteJid.split('@')[0].split(':')[0] : 'Desconocido'
         const isLid = remoteJid && remoteJid.includes('@lid')
-        
+
         if (isLid) {
             const rawLid = remoteJid.split('@')[0]
             // Intentar resolución nativa vía signalRepository
             const nativePn = await sessions[accountId]?.sock?.signalRepository?.lidMapping?.getPNForLID(remoteJid)
             const mappedPn = nativePn ? nativePn.split('@')[0] : sessions[accountId]?.contactLids?.[rawLid]
-            
+
             if (mappedPn) {
                 cleanNumber = mappedPn
                 remoteJid = `${mappedPn}@s.whatsapp.net`
@@ -397,59 +504,92 @@ export async function handleMessages(accountId, { messages, type }) {
         let remoteJid = msg.key.remoteJid
         const participant = msg.key.participant // Solo presente en grupos
 
-        // Ignorar estados de WhatsApp (status@broadcast)
+        // Ignorar estados
         if (remoteJid === 'status@broadcast') continue
 
-        // Ignorar mensajes de grupos o listas de difusión (solo queremos chats personales)
-        // remoteJid para grupos suele ser [id]@g.us
-        if (remoteJid && (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@broadcast') || remoteJid.endsWith('@v.us') || participant)) {
+        // 1. DETERMINAR IDENTIDAD (Resolver LID -> Teléfono)
+        const targetJid = participant || remoteJid
+        if (!targetJid) continue
+
+        let rawNum = targetJid.split('@')[0].split(':')[0]
+        const isLidIdentity = targetJid.includes('@lid')
+        const lidMap = sessions[accountId]?.contactLids || {}
+
+        // Intentar resolver el teléfono si es un LID o número muy largo
+        if (isLidIdentity || rawNum.length > 13) {
+            const originalLid = rawNum
+            
+            // Re-intento de resolución:
+            // a) Mapeo interno
+            if (lidMap[originalLid]) {
+                rawNum = lidMap[originalLid]
+            } else {
+                // b) Resolución nativa (v7 signal repo)
+                const fullLidJid = isLidIdentity ? targetJid : `${originalLid}@lid`
+                try {
+                    const res = await sessions[accountId]?.sock?.signalRepository?.lidMapping?.getPNForLID(fullLidJid)
+                    if (res) {
+                        rawNum = res.split('@')[0].split(':')[0]
+                        lidMap[originalLid] = rawNum
+                        console.log(`[${accountId}] 🔗 LID Traducido (Nativo): ${originalLid} -> ${rawNum}`)
+                    } else if (sessions[accountId]?.sock) {
+                        // c) Resolución dinámica via onWhatsApp
+                        const results = await sessions[accountId].sock.onWhatsApp(fullLidJid)
+                        if (results && results[0]?.exists) {
+                            rawNum = results[0].jid.split('@')[0].split(':')[0]
+                            lidMap[originalLid] = rawNum
+                            console.log(`[${accountId}] 🔄 LID Traducido (Dinámico): ${originalLid} -> ${rawNum}`)
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`[${accountId}] Error resolviendo LID ${originalLid}:`, e.message)
+                }
+            }
+        }
+
+        // 2. ACTUALIZAR CACHÉ Y NOTIFICAR AL CRM
+        const pushName = msg.pushName && String(msg.pushName).trim()
+        const contactMap = sessions[accountId]?.contactNamesByJid
+        
+        if (pushName && contactMap) {
+            contactMap[targetJid] = pushName
+            contactMap[`${rawNum}@s.whatsapp.net`] = pushName
+
+            // SOLO enviar al CRM si pudimos obtener un número de teléfono real (< 14 dígitos)
+            if (rawNum && rawNum.length < 14 && /^\d+$/.test(rawNum)) {
+                const soyAndradeWebhook = process.env.SOYANDRADE_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
+                
+                fetch(soyAndradeWebhook, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        type: 'name_update',
+                        phoneNumber: rawNum,
+                        userName: pushName,
+                        timestamp: Date.now()
+                    })
+                }).catch(() => { })
+
+                if (!sessions[accountId]._lastNotifiedName || sessions[accountId]._lastNotifiedName !== `${rawNum}_${pushName}`) {
+                    console.log(`[${accountId}] 📖 Nombre vinculado: ${rawNum} -> ${pushName}`)
+                    sessions[accountId]._lastNotifiedName = `${rawNum}_${pushName}`
+                }
+            } else {
+                // Si llegamos aquí y sigue siendo largo, es que falló la traducción
+                if (isLidIdentity || rawNum.length >= 14) {
+                    console.log(`[${accountId}] ⏳ Nombre en espera (ID aún no resuelto): ${rawNum} -> ${pushName}`)
+                }
+            }
+        }
+
+        // 3. CONTINUAR CON PROCESAMIENTO LEGADO (Bitend, etc.)
+        if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@broadcast') || participant) {
             continue
         }
 
-        // 1. DETERMINAR LA OTRA PARTE (The actual contact)
-        // En WA, el remoteJid de un chat individual SIEMPRE es el otro contacto,
-        // INCLUSO si el mensaje es fromMe: true.
-        // PEEEERO, si mandas un mensaje A TI MISMO, remoteJid == tu numero.
         const myJid = sessions[accountId]?.sock?.user?.id?.split(':')[0] + '@s.whatsapp.net'
         const isSelfChat = remoteJid === myJid
-
-        // Baileys v7.0.0+ LID Resolution
-        let cleanNumber = remoteJid ? remoteJid.split('@')[0].split(':')[0] : 'Desconocido'
-        const isLid = remoteJid && remoteJid.includes('@lid')
-        
-        if (isLid || (cleanNumber && cleanNumber.length > 13)) {
-            const rawLid = cleanNumber
-            const fullLidJid = isLid ? remoteJid : `${rawLid}@lid`
-            
-            // 1. Intentar resolución nativa (v7 signal repo)
-            const nativePn = await sessions[accountId]?.sock?.signalRepository?.lidMapping?.getPNForLID(fullLidJid)
-            let realPhone = nativePn ? nativePn.split('@')[0] : sessions[accountId]?.contactLids?.[rawLid]
-            
-            // 2. Si no tenemos mapeo, intentar resolverlo dinámicamente
-            if (!realPhone && sessions[accountId]?.sock) {
-                try {
-                    console.log(`[${accountId}] 🔍 Intentando resolver LID desconocido dinámicamente: ${rawLid}...`)
-                    const results = await sessions[accountId].sock.onWhatsApp(fullLidJid)
-                    if (results && results[0]?.exists) {
-                        realPhone = results[0].jid.split('@')[0].split(':')[0]
-                        if (realPhone && /^\d+$/.test(realPhone)) {
-                            sessions[accountId].contactLids[rawLid] = realPhone
-                            console.log(`[${accountId}] ✅ RESOLUCIÓN DINÁMICA EXITOSA: ${rawLid} -> ${realPhone}`)
-                        }
-                    }
-                } catch (err) {
-                    console.warn(`[${accountId}] Error en resolución dinámica de LID:`, err.message)
-                }
-            }
-
-            if (realPhone) {
-                console.log(`[${accountId}] 💥 RESOLUCIÓN LID APLICADA (${fromMe ? 'Saliente' : 'Entrante'}): ${rawLid} -> ${realPhone}`)
-                cleanNumber = realPhone
-                remoteJid = `${realPhone}@s.whatsapp.net`
-            } else if (cleanNumber && cleanNumber.length > 13) {
-                console.warn(`[${accountId}] ⚠️  No se pudo resolver el LID: ${cleanNumber}`)
-            }
-        }
+        let cleanNumber = rawNum
 
         // Si es un chat contigo mismo o el microservicio se perdió, ignorar para evitar duplicados infinitos
         if (isSelfChat && fromMe) {
@@ -522,10 +662,10 @@ export async function handleMessages(accountId, { messages, type }) {
                         timestamp: msg.messageTimestamp,
                         pushName: (() => {
                             const map = sessions[accountId]?.contactNamesByJid || {}
-                            
+
                             // Siempre intentar sacar el nombre del caché usando el JID del OTRO (destinatario/remitente)
                             const cachedName = map[remoteJid] || map[`${cleanNumber}@s.whatsapp.net`]
-                            
+
                             if (!fromMe) {
                                 // Entrante: El mensaje trae el pushName del que envía (el contacto)
                                 const inboundName = msg.pushName && String(msg.pushName).trim()
@@ -603,7 +743,7 @@ export async function sendMessage(accountId = 'default', number, message) {
     if (!number.includes('@') && number.length >= 15 && !number.startsWith('521')) { // Regla heurística para LIDs
         jid = `${number}@lid`
     }
-    
+
     // Baileys v7+: Usar isPnUser para validación lógica
     const isPn = isPnUser(jid)
     console.log(`[${accountId}] Enviando a JID resolved: ${jid} (isPn: ${isPn})`)
