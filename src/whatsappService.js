@@ -4,7 +4,7 @@ import fs from 'fs'
 import fetch from 'node-fetch'
 
 
-const sessions = {}
+export const sessions = {}
 const instanceId = Math.random().toString(36).substring(7)
 const sessionSuffix = Date.now().toString().slice(-4)
 const SESSIONS_FILE = './sessions.json'

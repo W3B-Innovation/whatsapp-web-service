@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import express from 'express'
-import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket } from './whatsappService.js'
+import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions } from './whatsappService.js'
+import { fetchAndSyncHistory } from './recovery.js'
 
 const app = express()
 const PORT = process.env.PORT || 4000
@@ -107,6 +108,31 @@ app.post('/send-message', async (req, res) => {
         }
 
         res.status(500).json({ error: 'Error al enviar mensaje' })
+    }
+})
+
+// Recuperar historial de un chat específico
+app.post('/fetch-history', async (req, res) => {
+    const { accountId = 'account-1', number, count = 50 } = req.body
+    
+    if (!number) {
+        return res.status(400).json({ error: 'Faltan parámetros: number es requerido' })
+    }
+
+    const sock = getSocket(accountId)
+    if (!sock) {
+        return res.status(503).json({ error: `La cuenta ${accountId} no está conectada.` })
+    }
+
+    try {
+        const jid = number.includes('@') ? number : `${number}@s.whatsapp.net`
+        const companyId = sessions[accountId]?.companyId || null
+        
+        const result = await fetchAndSyncHistory(sock, accountId, companyId, jid, count)
+        res.json(result)
+    } catch (error) {
+        console.error(`[${accountId}] Error en /fetch-history:`, error.message)
+        res.status(500).json({ error: error.message })
     }
 })
 
