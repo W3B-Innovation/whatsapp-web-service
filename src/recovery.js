@@ -50,14 +50,18 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
             }
         }
 
-        // v7: Para obtener los mensajes más recientes de un chat sin tener un mensaje previo como ancla,
-        // el anchorKey DEBE ser undefined. Si se pasa un ID que no existe, WA no devuelve nada.
-        const anchorKey = undefined;
+        // v7: Para obtener los mensajes más recientes sin error de 'remoteJid', 
+        // debemos pasar un objeto que TENGA remoteJid pero con id vacío o nulo.
+        const anchorKey = {
+            remoteJid: targetJid,
+            fromMe: false,
+            id: '' // Cadena vacía indica "empezar desde el último mensaje recibido"
+        };
 
-        // El timestamp es opcional si no hay anchorKey, lo omitimos para que traiga lo más reciente.
-        const timestampSeconds = undefined;
+        // El timestamp lo ponemos en 0 o lo omitimos para que no filtre por fecha inicial
+        const timestampSeconds = 0;
         
-        console.log(`[${accountId}] 📡 Enviando fetchMessageHistory (LATEST) para ${targetJid}...`);
+        console.log(`[${accountId}] 📡 Enviando fetchMessageHistory (INITIAL) para ${targetJid}...`);
         
         // Fallback extra para LIDs: si el mapeo falló, intentar onWhatsApp justo antes del fetch
         if (jid.includes('@lid') && targetJid.includes('@lid')) {
@@ -65,6 +69,7 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
                 const onWa = await sock.onWhatsApp(jid);
                 if (onWa && onWa[0]?.exists) {
                     targetJid = onWa[0].jid;
+                    anchorKey.remoteJid = targetJid;
                     console.log(`[${accountId}] 🔄 LID Resuelto via onWhatsApp: ${jid} -> ${targetJid}`);
                 }
             } catch (e) { }
@@ -72,32 +77,18 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
 
         await sock.fetchMessageHistory(countNum, anchorKey, timestampSeconds);
         
-        console.log(`[${accountId}] ✅ Solicitud de historial enviada para ${targetJid}. Cantidad: ${countNum}.`);
+        console.log(`[${accountId}] ✅ Solicitud de historial enviada para ${targetJid}.`);
 
         return { 
             success: true, 
-            requestedCount: countNum,
-            total: countNum, // Cantidad solicitada
-            synced: 0, // Aún no sabemos cuántos se sincronizarán realmente
-            status: 'processing',
-            message: `Solicitud de recuperación de ${countNum} mensajes enviada. Procesando asíncronamente...`
+            message: `Solicitud de recuperación de ${countNum} mensajes enviada.`
         };
 
     } catch (error) {
-        console.error(`[${accountId}] ❌ Error al solicitar historial:`, error.message);
-        
-        // Fallback: Intentar sincronización general si la específica falla
-        try {
-            console.log(`[${accountId}] 🔄 Intentando fallback: Sincronización general de historial...`);
-            await sock.fetchMessageHistory(Number(count), undefined, undefined);
-            return { 
-                success: true, 
-                total: count, 
-                synced: 0, 
-                message: "Se inició una sincronización general para recuperar conversaciones." 
-            };
-        } catch (fallbackError) {
-            throw new Error(`No se pudo iniciar la recuperación: ${fallbackError.message}`);
-        }
+        console.error(`[${accountId}] ❌ Error al solicitar historial para ${jid}:`, error.message);
+        return { 
+            success: false, 
+            error: error.message 
+        };
     }
 }
