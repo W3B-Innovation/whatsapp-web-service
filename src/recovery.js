@@ -50,23 +50,26 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
             }
         }
 
-        // Si no tenemos un mensaje de ancla, Baileys v7 a veces falla con {id: ''}.
-        // Generamos un ID que parezca real de WhatsApp (20 hex chars) para evitar rechazos
-        const fakeId = [...Array(20)].map(() => Math.floor(Math.random() * 16).toString(16)).join('').toUpperCase();
-        
-        const anchorKey = { 
-            remoteJid: targetJid, 
-            fromMe: false, 
-            id: fakeId
-        };
+        // v7: Para obtener los mensajes más recientes de un chat sin tener un mensaje previo como ancla,
+        // el anchorKey DEBE ser undefined. Si se pasa un ID que no existe, WA no devuelve nada.
+        const anchorKey = undefined;
 
-        // El timestamp debe estar en segundos para Baileys v7
-        // Si pedimos historial, debemos usar un timestamp pasado (ej: 30 días) si queremos ver lo anterior.
-        const timestampSeconds = Math.floor(Date.now() / 1000) - (60 * 60 * 24 * 30);
+        // El timestamp es opcional si no hay anchorKey, lo omitimos para que traiga lo más reciente.
+        const timestampSeconds = undefined;
         
-        console.log(`[${accountId}] 📡 Enviando fetchMessageHistory para ${targetJid}...`);
-        console.log(`[${accountId}] 🔍 Parámetros: Count=${countNum}, AnchorID=${fakeId}, Since=${new Date(timestampSeconds * 1000).toISOString()}`);
+        console.log(`[${accountId}] 📡 Enviando fetchMessageHistory (LATEST) para ${targetJid}...`);
         
+        // Fallback extra para LIDs: si el mapeo falló, intentar onWhatsApp justo antes del fetch
+        if (jid.includes('@lid') && targetJid.includes('@lid')) {
+            try {
+                const onWa = await sock.onWhatsApp(jid);
+                if (onWa && onWa[0]?.exists) {
+                    targetJid = onWa[0].jid;
+                    console.log(`[${accountId}] 🔄 LID Resuelto via onWhatsApp: ${jid} -> ${targetJid}`);
+                }
+            } catch (e) { }
+        }
+
         await sock.fetchMessageHistory(countNum, anchorKey, timestampSeconds);
         
         console.log(`[${accountId}] ✅ Solicitud de historial enviada para ${targetJid}. Cantidad: ${countNum}.`);
