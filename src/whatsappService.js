@@ -699,11 +699,9 @@ export async function handleMessages(accountId, { messages, type }, isHistory = 
             const originalLid = rawNum
             
             // Re-intento de resolución:
-            // a) Mapeo interno
             if (lidMap[originalLid]) {
                 rawNum = lidMap[originalLid]
             } else {
-                // b) Resolución nativa (Baileys v7 internal mapping)
                 const fullLidJid = isLidIdentity ? targetJid : `${originalLid}@lid`
                 try {
                     const sock = sessions[accountId]?.sock
@@ -714,7 +712,6 @@ export async function handleMessages(accountId, { messages, type }, isHistory = 
                         lidMap[originalLid] = rawNum
                         console.log(`[${accountId}] 🔗 LID Traducido (Nativo): ${originalLid} -> ${rawNum}`)
                     } else if (sock) {
-                        // c) Resolución dinámica via onWhatsApp (algunos LIDs responden aquí)
                         const results = await sock.onWhatsApp(fullLidJid)
                         if (results && results[0]?.exists && results[0].jid.includes('@s.whatsapp.net')) {
                             rawNum = results[0].jid.split('@')[0].split(':')[0]
@@ -722,54 +719,25 @@ export async function handleMessages(accountId, { messages, type }, isHistory = 
                             console.log(`[${accountId}] 🔄 LID Traducido (onWhatsApp): ${originalLid} -> ${rawNum}`)
                         }
                     }
-                } catch (e) {
-                    console.warn(`[${accountId}] Error resolviendo LID ${originalLid}:`, e.message)
-                }
+                } catch (e) { }
             }
             
-            // CRITICAL: Actualizar el remoteJid del mensaje para que el webhook use el número real
+            // Actualizar el remoteJid del mensaje para que el webhook use el número real
             if (rawNum && rawNum.length < 14) {
                 msg.key.remoteJid = `${rawNum}@s.whatsapp.net`
             }
         }
 
-        // 2. ACTUALIZAR CACHÉ Y NOTIFICAR AL CRM
-        // Solo actualizar el nombre si el mensaje es ENTRANTE (!fromMe)
+        // 2. ACTUALIZAR CACHÉ DE NOMBRES
         const pushName = !fromMe ? (msg.pushName && String(msg.pushName).trim()) : null
-        const contactMap = sessions[accountId]?.contactNamesByJid
-        
-        if (pushName && contactMap) {
-            contactMap[targetJid] = pushName
-            contactMap[`${rawNum}@s.whatsapp.net`] = pushName
-
-            // SOLO enviar al CRM si pudimos obtener un número de teléfono real (< 14 dígitos)
-            if (rawNum && rawNum.length < 14 && /^\d+$/.test(rawNum)) {
-                const soyAndradeWebhook = process.env.SOYANDRADE_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
-                
-                fetch(soyAndradeWebhook, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        type: 'name_update',
-                        phoneNumber: rawNum,
-                        userName: pushName,
-                        timestamp: Date.now()
-                    })
-                }).catch(() => { })
-
-                if (!sessions[accountId]._lastNotifiedName || sessions[accountId]._lastNotifiedName !== `${rawNum}_${pushName}`) {
-                    console.log(`[${accountId}] 📖 Nombre vinculado: ${rawNum} -> ${pushName}`)
-                    sessions[accountId]._lastNotifiedName = `${rawNum}_${pushName}`
-                }
-            } else {
-                // Si llegamos aquí y sigue siendo largo, es que falló la traducción
-                if (isLidIdentity || rawNum.length >= 14) {
-                    console.log(`[${accountId}] ⏳ Nombre en espera (ID aún no resuelto): ${rawNum} -> ${pushName}`)
-                }
+        if (pushName && sessions[accountId]?.contactNamesByJid) {
+            sessions[accountId].contactNamesByJid[targetJid] = pushName
+            if (rawNum && rawNum.length < 14) {
+                sessions[accountId].contactNamesByJid[`${rawNum}@s.whatsapp.net`] = pushName
             }
         }
 
-        // 3. CONTINUAR CON PROCESAMIENTO LEGADO (Bitend, etc.)
+        // 3. CONTINUAR CON PROCESAMIENTO (Bitend, etc.)
         await sendToWebhook(accountId, msg, finalIsHistory)
     }
 }
