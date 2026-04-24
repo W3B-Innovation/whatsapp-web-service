@@ -7,8 +7,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Configuración
-const MICROSERVICE_URL = 'https://wb.bitend.ai'; // Cambia esto si el servicio está en otro puerto o dominio
-const ACCOUNT_ID = 'VJxvPDx2uAgLfKiKwoSW-custom-1776276193580'; // La cuenta que vimos en los logs
+const MICROSERVICE_URL = 'https://wb.bitend.ai';
+// Permitir pasar el ID de cuenta como argumento: node scripts/mass_sync.js ID_DE_CUENTA
+const ACCOUNT_ID = process.argv[2] || 'VJxvPDx2uAgLfKiKwoSW-custom-1776973146569';
 const MARKDOWN_FILE = 'C:/Users/Oscar/.gemini/antigravity/brain/e40644f5-0bca-44b2-aadc-6a051dfc7575/registro_recuperacion_parcial.md.resolved';
 
 async function runMassSync() {

@@ -61,9 +61,16 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
         // El timestamp lo ponemos en 0 o lo omitimos para que no filtre por fecha inicial
         const timestampSeconds = 0;
         
-        console.log(`[${accountId}] 📡 Enviando fetchMessageHistory (INITIAL) para ${targetJid}...`);
+        console.log(`[${accountId}] 📡 Suscribiendo presencia y pidiendo historial para ${targetJid}...`);
         
-        // Fallback extra para LIDs: si el mapeo falló, intentar onWhatsApp justo antes del fetch
+        // "Despertar" el chat: esto le indica a WA que estamos interesados en este JID
+        try {
+            await sock.presenceSubscribe(targetJid);
+        } catch (e) {
+            console.warn(`[${accountId}] ⚠️ No se pudo suscribir presencia para ${targetJid}:`, e.message);
+        }
+        
+        // Fallback extra para LIDs...
         if (jid.includes('@lid') && targetJid.includes('@lid')) {
             try {
                 const onWa = await sock.onWhatsApp(jid);
