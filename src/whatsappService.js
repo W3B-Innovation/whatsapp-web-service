@@ -156,6 +156,10 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
         const webhookUrl = process.env.CRM_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
         
         try {
+            if (isHistory) {
+                console.log(`[${accountId}] 🕒 Enviando HISTORIAL al CRM: ${finalCleanNumber} (${text.substring(0, 20)}...)`)
+            }
+
             const response = await fetch(webhookUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -670,6 +674,9 @@ async function getProfilePic(accountId, jid) {
  */
 export async function handleMessages(accountId, { messages, type }, isHistory = false) {
     if (type !== 'notify' && type !== 'append') return
+    
+    // Si el tipo es 'append', casi con seguridad es historial solicitado
+    const finalIsHistory = isHistory || type === 'append'
 
     for (const msg of messages) {
         const fromMe = msg.key.fromMe
@@ -719,6 +726,11 @@ export async function handleMessages(accountId, { messages, type }, isHistory = 
                     console.warn(`[${accountId}] Error resolviendo LID ${originalLid}:`, e.message)
                 }
             }
+            
+            // CRITICAL: Actualizar el remoteJid del mensaje para que el webhook use el número real
+            if (rawNum && rawNum.length < 14) {
+                msg.key.remoteJid = `${rawNum}@s.whatsapp.net`
+            }
         }
 
         // 2. ACTUALIZAR CACHÉ Y NOTIFICAR AL CRM
@@ -758,7 +770,7 @@ export async function handleMessages(accountId, { messages, type }, isHistory = 
         }
 
         // 3. CONTINUAR CON PROCESAMIENTO LEGADO (Bitend, etc.)
-        await sendToWebhook(accountId, msg, isHistory)
+        await sendToWebhook(accountId, msg, finalIsHistory)
     }
 }
 
