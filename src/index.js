@@ -115,6 +115,8 @@ app.post('/send-message', async (req, res) => {
 app.post('/fetch-history', async (req, res) => {
     const { accountId = 'account-1', number, count = 50 } = req.body
     
+    console.log(`[API:FetchHistory] Recibida solicitud para ${number} (Cuenta: ${accountId}, Cantidad: ${count})`)
+    
     if (!number) {
         return res.status(400).json({ error: 'Faltan parámetros: number es requerido' })
     }

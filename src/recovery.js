@@ -24,9 +24,11 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
 
         return { 
             success: true, 
-            total: countNum, 
-            synced: countNum, // Indicamos éxito en la solicitud
-            message: `Solicitud enviada. Los mensajes de ${jid} se sincronizarán en segundo plano.`
+            requestedCount: countNum,
+            total: countNum, // Mantenemos por compatibilidad con el CRM actual
+            synced: countNum, // Mantenemos por compatibilidad con el CRM actual
+            status: 'started',
+            message: `Solicitud de recuperación de ${countNum} mensajes enviada. Los mensajes se sincronizarán en segundo plano.`
         };
 
     } catch (error) {
