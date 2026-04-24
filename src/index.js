@@ -126,6 +126,9 @@ app.post('/fetch-history', async (req, res) => {
         return res.status(503).json({ error: `La cuenta ${accountId} no está conectada.` })
     }
 
+    const ownNumber = sock.user?.id?.split(':')[0] || 'desconocido'
+    console.log(`[API:FetchHistory] Usando cuenta ${accountId} (Propia: ${ownNumber}) para recuperar ${number}`)
+
     try {
         const jid = number.includes('@') ? number : `${number}@s.whatsapp.net`
         const companyId = sessions[accountId]?.companyId || null
