@@ -35,6 +35,9 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
 
                 if (!text && !msg.message) continue;
 
+                const myId = sock.user?.id || sock.authState?.creds?.me?.id;
+                const myJid = myId ? myId.split(':')[0] + '@s.whatsapp.net' : undefined;
+
                 const response = await fetch(webhookUrl, {
                     method: 'POST',
                     headers: { 
@@ -49,7 +52,7 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
                         message: {
                             id: msgId,
                             from: remoteJid,
-                            to: fromMe ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : undefined,
+                            to: fromMe ? myJid : undefined,
                             body: text,
                             text: text,
                             timestamp: msg.messageTimestamp,
