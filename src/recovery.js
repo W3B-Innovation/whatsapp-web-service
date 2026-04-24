@@ -17,10 +17,34 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
         
         const countNum = Number(count);
         
-        // Intentar con la clave del chat
-        await sock.fetchMessageHistory(countNum, { remoteJid: jid, fromMe: false, id: '' }, Date.now());
+        // v7: El JID DEBE ser @s.whatsapp.net para fetchMessageHistory. 
+        // Si es un LID, el servidor de WA no encontrará el historial.
+        let targetJid = jid;
+        if (jid.includes('@lid')) {
+            const rawLid = jid.split('@')[0];
+            const mapped = sessions[accountId]?.contactLids?.[rawLid];
+            if (mapped) {
+                targetJid = `${mapped}@s.whatsapp.net`;
+                console.log(`[${accountId}] 🔄 Usando PN resuelto para historial: ${targetJid}`);
+            } else {
+                console.warn(`[${accountId}] ⚠️ Intentando recuperar historial de un LID no resuelto: ${jid}. Podría fallar.`);
+            }
+        }
+
+        // Si no tenemos un mensaje de ancla, Baileys v7 a veces falla con {id: ''}.
+        // Intentamos enviar una clave mínima pero válida si no se provee una.
+        const anchorKey = { 
+            remoteJid: targetJid, 
+            fromMe: false, 
+            id: 'SYNC_' + Date.now() // Un ID ficticio para forzar la petición si no hay mensajes
+        };
+
+        // El timestamp debe estar en segundos para Baileys v7
+        const timestampSeconds = Math.floor(Date.now() / 1000);
         
-        console.log(`[${accountId}] ✅ Solicitud de historial enviada para ${jid}. Procesando asíncronamente.`);
+        await sock.fetchMessageHistory(countNum, anchorKey, timestampSeconds);
+        
+        console.log(`[${accountId}] ✅ Solicitud de historial enviada para ${targetJid}. Cantidad: ${countNum}.`);
 
         return { 
             success: true, 

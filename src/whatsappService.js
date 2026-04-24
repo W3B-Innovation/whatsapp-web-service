@@ -295,10 +295,18 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
         logger: pino({ level: 'silent' }),
         browser: [sessions[accountId].browserName, 'Chrome', '1.0.0'],
         connectTimeoutMs: 60000,
-        syncFullHistory: false,
+        syncFullHistory: true, // Habilitar para permitir recuperación de historial completo
         markOnlineOnConnect: false,
         linkPreviewImageThumbnailWidth: 192,
-        shouldSyncHistoryMessage: () => false
+        // IMPORTANTE: Debe ser true para que fetchMessageHistory funcione.
+        // Si es false, Baileys ignora los paquetes de historial enviados por WhatsApp.
+        shouldSyncHistoryMessage: () => true,
+        // Ayuda a Baileys a recuperar contenido de mensajes si es necesario
+        getMessage: async (key) => {
+            return {
+                conversation: '...' // Placeholder o implementación real si hubiera store
+            }
+        }
     })
 
     sessions[accountId].sock = sock
