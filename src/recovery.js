@@ -1,84 +1,49 @@
 import fetch from 'node-fetch'
 
 /**
- * Recupera el historial de mensajes de un chat específico y lo envía al CRM.
+ * Solicita el historial de mensajes al teléfono.
+ * En Baileys v7, esta operación es asíncrona: los mensajes llegarán vía el evento 'messaging-history.set'
+ * en whatsappService.js, el cual los reenviará al CRM.
  */
 export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count = 50) {
     if (!sock) throw new Error('Socket no disponible');
 
-    console.log(`[${accountId}] 🕒 Solicitando historial para ${jid} (cantidad: ${count})...`);
+    console.log(`[${accountId}] 🕒 Iniciando solicitud de historial para ${jid} (cantidad: ${count})...`);
 
     try {
-        // fetchMessageHistory devuelve una promesa con el array de mensajes
-        const messages = await sock.fetchMessageHistory(jid, count, undefined);
+        // La firma correcta en Baileys v7 es: fetchMessageHistory(count, oldestMsgKey, oldestMsgTimestamp)
+        // Si no tenemos el ID del último mensaje, usamos un objeto con id vacío.
+        // Esto le indica a WhatsApp que queremos los últimos 'count' mensajes.
         
-        if (!messages || messages.length === 0) {
-            console.log(`[${accountId}] ℹ️ No se encontró historial para ${jid} en el dispositivo.`);
-            return { success: true, count: 0 };
-        }
-
-        console.log(`[${accountId}] 📥 Historial recibido: ${messages.length} mensajes. Sincronizando con CRM...`);
-
-        const webhookUrl = process.env.CRM_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook';
+        const countNum = Number(count);
         
-        let successCount = 0;
-        for (const msg of messages) {
-            const msgId = msg.key.id;
-            try {
-                // Preparar el payload compatible con el webhook (formato Baileys)
-                const fromMe = !!msg.key.fromMe;
-                const remoteJid = msg.key.remoteJid;
-                const text = msg.message?.conversation || 
-                             msg.message?.extendedTextMessage?.text || 
-                             msg.message?.imageMessage?.caption || 
-                             msg.message?.videoMessage?.caption || "";
+        // Intentar con la clave del chat
+        await sock.fetchMessageHistory(countNum, { remoteJid: jid, fromMe: false, id: '' }, Date.now());
+        
+        console.log(`[${accountId}] ✅ Solicitud de historial enviada para ${jid}. Procesando asíncronamente.`);
 
-                if (!text && !msg.message) continue;
-
-                const myId = sock.user?.id || sock.authState?.creds?.me?.id;
-                const myJid = myId ? myId.split(':')[0] + '@s.whatsapp.net' : undefined;
-
-                const response = await fetch(webhookUrl, {
-                    method: 'POST',
-                    headers: { 
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${process.env.CRM_SYNC_TOKEN}`
-                    },
-                    body: JSON.stringify({
-                        accountId,
-                        session: accountId, // EL WEBHOOK NECESITA ESTO PARA EL FORMATO BAILEYS
-                        companyId,
-                        event: 'on_message',
-                        message: {
-                            id: msgId,
-                            from: remoteJid,
-                            to: fromMe ? myJid : undefined,
-                            body: text,
-                            text: text,
-                            timestamp: msg.messageTimestamp,
-                            fromMe: fromMe,
-                            type: msg.message?.imageMessage ? 'image' : (msg.message?.videoMessage ? 'video' : 'chat'),
-                            isHistory: true
-                        }
-                    })
-                });
-
-                if (response.ok) {
-                    successCount++;
-                } else {
-                    const errBody = await response.text().catch(() => 'No error body');
-                    console.error(`[${accountId}] Error en webhook (${response.status}): ${errBody}`);
-                }
-            } catch (err) {
-                console.error(`[${accountId}] Error sincronizando mensaje ${msgId}:`, err.message);
-            }
-        }
-
-        console.log(`[${accountId}] ✅ Sincronización de historial completada: ${successCount}/${messages.length} mensajes procesados.`);
-        return { success: true, total: messages.length, synced: successCount };
+        return { 
+            success: true, 
+            total: countNum, 
+            synced: countNum, // Indicamos éxito en la solicitud
+            message: `Solicitud enviada. Los mensajes de ${jid} se sincronizarán en segundo plano.`
+        };
 
     } catch (error) {
-        console.error(`[${accountId}] ❌ Error crítico recuperando historial:`, error.message);
-        throw error;
+        console.error(`[${accountId}] ❌ Error al solicitar historial:`, error.message);
+        
+        // Fallback: Intentar sincronización general si la específica falla
+        try {
+            console.log(`[${accountId}] 🔄 Intentando fallback: Sincronización general de historial...`);
+            await sock.fetchMessageHistory(Number(count), undefined, undefined);
+            return { 
+                success: true, 
+                total: count, 
+                synced: 0, 
+                message: "Se inició una sincronización general para recuperar conversaciones." 
+            };
+        } catch (fallbackError) {
+            throw new Error(`No se pudo iniciar la recuperación: ${fallbackError.message}`);
+        }
     }
 }

@@ -64,6 +64,135 @@ const globalStats = {
 // Contadores por empresa (companyId -> counters)
 const companyStats = {}
 
+/**
+ * Función centralizada para enviar mensajes al CRM
+ */
+async function sendToWebhook(accountId, msg, isHistory = false) {
+    const session = sessions[accountId]
+    if (!session || !session.sock) return
+
+    const { remoteJid, fromMe, participant } = msg.key
+    const rawNum = remoteJid.split('@')[0].split(':')[0]
+    
+    // 1. RESOLVER JID Y LID (Baileys v7)
+    let targetJid = remoteJid
+    let originalLid = null
+    const isLidIdentity = remoteJid.includes('@lid')
+    
+    if (isLidIdentity) {
+        originalLid = rawNum
+        const mapped = session.contactLids[originalLid]
+        if (mapped) {
+            targetJid = `${mapped}@s.whatsapp.net`
+        }
+    }
+
+    // 2. FILTRAR GRUPOS Y BROADCASTS
+    if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@broadcast') || participant) {
+        return
+    }
+
+    const myJid = session.sock.user?.id?.split(':')[0] + '@s.whatsapp.net'
+    const isSelfChat = remoteJid === myJid
+    const finalCleanNumber = targetJid.split('@')[0].split(':')[0]
+
+    if (isSelfChat && fromMe) return
+
+    // 3. MEDIA Y TEXTO
+    const messageType = Object.keys(msg.message || {})[0] || 'unknown'
+    const hasMedia = ['imageMessage', 'videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(messageType)
+
+    let mediaBase64 = null
+    let mimetype = null
+    let fileName = null
+
+    if (hasMedia) {
+        try {
+            const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
+                logger: pino({ level: 'silent' }),
+                reuploadRequest: session.sock.updateMediaMessage
+            })
+            mediaBase64 = buffer.toString('base64')
+            mimetype = msg.message[messageType].mimetype
+            fileName = msg.message[messageType].fileName || null
+        } catch (err) {
+            console.error(`[${accountId}] Error descargando media:`, err.message)
+        }
+    }
+
+    const text = msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption ||
+        msg.message?.videoMessage?.caption ||
+        ""
+
+    if (text || msg.message) {
+        // Incrementar contadores
+        if (fromMe) globalStats.messagesSent++
+        else globalStats.messagesReceived++
+
+        const cId = session.companyId
+        if (cId) {
+            if (!companyStats[cId]) companyStats[cId] = { messagesReceived: 0, messagesSent: 0, webhookSuccess: 0, webhookErrors: 0 }
+            if (fromMe) companyStats[cId].messagesSent++
+            else companyStats[cId].messagesReceived++
+        }
+
+        const webhookUrl = process.env.CRM_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
+        
+        try {
+            const response = await fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    accountId,
+                    companyId: session.companyId || null,
+                    fromMe,
+                    remoteJid,
+                    cleanNumber: finalCleanNumber,
+                    text,
+                    isHistory,
+                    timestamp: msg.messageTimestamp,
+                    pushName: (() => {
+                        const map = session.contactNamesByJid || {}
+                        const cachedName = map[remoteJid] || map[`${finalCleanNumber}@s.whatsapp.net`]
+                        if (!fromMe) {
+                            const inboundName = msg.pushName && String(msg.pushName).trim()
+                            if (inboundName) {
+                                map[remoteJid] = inboundName
+                                map[`${finalCleanNumber}@s.whatsapp.net`] = inboundName
+                                return inboundName
+                            }
+                            return cachedName || null
+                        }
+                        return cachedName || null
+                    })(),
+                    messageId: msg.key.id,
+                    media: hasMedia ? {
+                        type: messageType,
+                        mimetype,
+                        fileName,
+                        base64: mediaBase64
+                    } : null
+                })
+            })
+
+            if (!response.ok) {
+                globalStats.webhookErrors++
+                if (cId && companyStats[cId]) companyStats[cId].webhookErrors++
+                const errorBody = await response.text().catch(() => 'No body');
+                console.error(`[${accountId}] Error webhook (${response.status}): ${errorBody}`)
+            } else {
+                globalStats.webhookSuccess++
+                if (cId && companyStats[cId]) companyStats[cId].webhookSuccess++
+            }
+        } catch (err) {
+            globalStats.webhookErrors++
+            console.error(`[${accountId}] Error de conexión webhook:`, err.message)
+        }
+    }
+}
+
 export function getGlobalStats(companyId = null) {
     if (companyId) {
         // Filtrar sesiones que pertenecen a esta empresa
@@ -199,10 +328,21 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
     }
     sock.ev.on('contacts.upsert', mergeContactNames)
     sock.ev.on('contacts.update', mergeContactNames)
-    sock.ev.on('messaging-history.set', ({ contacts }) => {
+    sock.ev.on('messaging-history.set', async ({ contacts, messages, chats, isLatest }) => {
         if (contacts && contacts.length > 0) {
             console.log(`[${accountId}] 📥 Sincronizando ${contacts.length} contactos desde historial...`)
             mergeContactNames(contacts)
+        }
+        
+        if (messages && messages.length > 0) {
+            console.log(`[${accountId}] 📥 Procesando ${messages.length} mensajes desde historial...`)
+            // Procesar mensajes históricos de forma secuencial pero eficiente
+            for (const msg of messages) {
+                await sendToWebhook(accountId, msg, true).catch(err => 
+                    console.error(`[${accountId}] Error procesando mensaje histórico:`, err.message)
+                )
+            }
+            console.log(`[${accountId}] ✅ Historial procesado.`)
         }
     })
 
@@ -583,128 +723,7 @@ export async function handleMessages(accountId, { messages, type }) {
         }
 
         // 3. CONTINUAR CON PROCESAMIENTO LEGADO (Bitend, etc.)
-        if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@broadcast') || participant) {
-            continue
-        }
-
-        const myJid = sessions[accountId]?.sock?.user?.id?.split(':')[0] + '@s.whatsapp.net'
-        const isSelfChat = remoteJid === myJid
-        let cleanNumber = rawNum
-
-        // Si es un chat contigo mismo o el microservicio se perdió, ignorar para evitar duplicados infinitos
-        if (isSelfChat && fromMe) {
-            console.warn(`[${accountId}] Ignorando mensaje saliente a uno mismo para evitar bucle/duplicado.`)
-            continue
-        }
-
-        // Obtener foto de perfil (async, pero no bloqueante para el flujo principal si falla)
-        const profilePicUrl = await getProfilePic(accountId, remoteJid)
-
-        // Detectar si es un mensaje con media
-        const messageType = Object.keys(msg.message || {})[0] || 'unknown'
-        const hasMedia = ['imageMessage', 'videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(messageType)
-
-        let mediaBase64 = null
-        let mimetype = null
-        let fileName = null
-
-        if (hasMedia) {
-            try {
-                const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
-                    logger: pino({ level: 'silent' }),
-                    reuploadRequest: sessions[accountId].sock.updateMediaMessage
-                })
-                mediaBase64 = buffer.toString('base64')
-                mimetype = msg.message[messageType].mimetype
-                fileName = msg.message[messageType].fileName || null
-            } catch (err) {
-                console.error(`[${accountId}] Error descargando media:`, err.message)
-            }
-        }
-
-        const text = msg.message?.conversation ||
-            msg.message?.extendedTextMessage?.text ||
-            msg.message?.imageMessage?.caption ||
-            msg.message?.videoMessage?.caption ||
-            ""
-
-        const direction = fromMe ? '📤 Mensaje saliente a' : '📩 Mensaje entrante de'
-
-        if (text || msg.message) {
-            console.log(`[${accountId}] ${direction} ${cleanNumber}: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`)
-
-            // Incrementar contadores de mensajes (global + por empresa)
-            if (fromMe) globalStats.messagesSent++
-            else globalStats.messagesReceived++
-
-            const cId = sessions[accountId]?.companyId
-            if (cId) {
-                if (!companyStats[cId]) companyStats[cId] = { messagesReceived: 0, messagesSent: 0, webhookSuccess: 0, webhookErrors: 0 }
-                if (fromMe) companyStats[cId].messagesSent++
-                else companyStats[cId].messagesReceived++
-            }
-
-            // Enviar al CRM vía Webhook
-            const webhookUrl = process.env.CRM_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
-            const companyId = sessions[accountId]?.companyId || null;
-
-            try {
-                const response = await fetch(webhookUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        accountId,
-                        companyId,
-                        fromMe,
-                        remoteJid,
-                        cleanNumber,
-                        text,
-                        timestamp: msg.messageTimestamp,
-                        pushName: (() => {
-                            const map = sessions[accountId]?.contactNamesByJid || {}
-
-                            // Siempre intentar sacar el nombre del caché usando el JID del OTRO (destinatario/remitente)
-                            const cachedName = map[remoteJid] || map[`${cleanNumber}@s.whatsapp.net`]
-
-                            if (!fromMe) {
-                                // Entrante: El mensaje trae el pushName del que envía (el contacto)
-                                const inboundName = msg.pushName && String(msg.pushName).trim()
-                                if (inboundName) {
-                                    map[remoteJid] = inboundName
-                                    map[`${cleanNumber}@s.whatsapp.net`] = inboundName
-                                    return inboundName
-                                }
-                                return cachedName || null
-                            } else {
-                                // Saliente: El pushName en el mensaje eres TÚ. 
-                                // DEBEMOS ignorarlo y usar el nombre del destinatario que tengamos en caché.
-                                return cachedName || null
-                            }
-                        })(),
-                        messageId: msg.key.id,
-                        media: hasMedia ? {
-                            type: messageType,
-                            mimetype,
-                            fileName,
-                            base64: mediaBase64
-                        } : null
-                    })
-                })
-
-                if (!response.ok) {
-                    globalStats.webhookErrors++
-                    if (companyId && companyStats[companyId]) companyStats[companyId].webhookErrors++
-                    const errorBody = await response.text().catch(() => 'No body');
-                    console.error(`[${accountId}] Error enviando al webhook (${response.status}): ${errorBody}`)
-                } else {
-                    globalStats.webhookSuccess++
-                    if (companyId && companyStats[companyId]) companyStats[companyId].webhookSuccess++
-                }
-            } catch (err) {
-                globalStats.webhookErrors++
-                console.error(`[${accountId}] Error de conexión con el webhook:`, err.message)
-            }
-        }
+        await sendToWebhook(accountId, msg)
     }
 }
 
