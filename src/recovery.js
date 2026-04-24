@@ -23,9 +23,10 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
         
         let successCount = 0;
         for (const msg of messages) {
+            const msgId = msg.key.id;
             try {
-                // Preparar el payload similar al de handleMessages
-                const fromMe = msg.key.fromMe;
+                // Preparar el payload compatible con el webhook (formato Baileys)
+                const fromMe = !!msg.key.fromMe;
                 const remoteJid = msg.key.remoteJid;
                 const text = msg.message?.conversation || 
                              msg.message?.extendedTextMessage?.text || 
@@ -34,27 +35,39 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
 
                 if (!text && !msg.message) continue;
 
-                const cleanNumber = remoteJid.split('@')[0].split(':')[0];
-
                 const response = await fetch(webhookUrl, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${process.env.CRM_SYNC_TOKEN}`
+                    },
                     body: JSON.stringify({
                         accountId,
+                        session: accountId, // EL WEBHOOK NECESITA ESTO PARA EL FORMATO BAILEYS
                         companyId,
-                        fromMe,
-                        remoteJid,
-                        cleanNumber,
-                        text,
-                        timestamp: msg.messageTimestamp,
-                        messageId: msg.key.id,
-                        isHistory: true // Flag para que el CRM sepa que es historial
+                        event: 'on_message',
+                        message: {
+                            id: msgId,
+                            from: remoteJid,
+                            to: fromMe ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : undefined,
+                            body: text,
+                            text: text,
+                            timestamp: msg.messageTimestamp,
+                            fromMe: fromMe,
+                            type: msg.message?.imageMessage ? 'image' : (msg.message?.videoMessage ? 'video' : 'chat'),
+                            isHistory: true
+                        }
                     })
                 });
 
-                if (response.ok) successCount++;
+                if (response.ok) {
+                    successCount++;
+                } else {
+                    const errBody = await response.text().catch(() => 'No error body');
+                    console.error(`[${accountId}] Error en webhook (${response.status}): ${errBody}`);
+                }
             } catch (err) {
-                console.error(`[${accountId}] Error sincronizando mensaje individual del historial:`, err.message);
+                console.error(`[${accountId}] Error sincronizando mensaje ${msgId}:`, err.message);
             }
         }
 
