@@ -81,7 +81,22 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
     
     if (isLidIdentity) {
         originalLid = rawNum
-        const mapped = session.contactLids[originalLid]
+        let mapped = session.contactLids[originalLid]
+        
+        // v7: Intentar resolución nativa si no hay mapeo en caché
+        if (!mapped && session.sock?.signalRepository?.lidMapping) {
+            try {
+                const res = await session.sock.signalRepository.lidMapping.getPNForLID(remoteJid)
+                if (res) {
+                    mapped = res.split('@')[0]
+                    session.contactLids[originalLid] = mapped
+                    console.log(`[${accountId}] 🔗 LID Traducido (sendToWebhook): ${originalLid} -> ${mapped}`)
+                }
+            } catch (e) {
+                console.warn(`[${accountId}] Error resolviendo LID en webhook:`, e.message)
+            }
+        }
+
         if (mapped) {
             targetJid = `${mapped}@s.whatsapp.net`
         }
@@ -156,6 +171,8 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
                     pushName: (() => {
                         const map = session.contactNamesByJid || {}
                         const cachedName = map[remoteJid] || map[`${finalCleanNumber}@s.whatsapp.net`]
+                        
+                        // Si el mensaje es entrante, capturar el pushName del remitente
                         if (!fromMe) {
                             const inboundName = msg.pushName && String(msg.pushName).trim()
                             if (inboundName) {
@@ -163,8 +180,10 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
                                 map[`${finalCleanNumber}@s.whatsapp.net`] = inboundName
                                 return inboundName
                             }
-                            return cachedName || null
                         }
+                        
+                        // Si el mensaje es saliente o no tiene pushName entrante, usar el caché (que debería tener el nombre del contacto)
+                        // NUNCA devolver el pushName del mensaje si fromMe es true, porque sería nuestro propio nombre.
                         return cachedName || null
                     })(),
                     messageId: msg.key.id,
@@ -308,7 +327,8 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
             const jid = c.id || c.jid || ''
             const name = (c.name && String(c.name).trim()) || (c.notify && String(c.notify).trim()) || ''
 
-            if (name && jid) {
+            // No guardar nuestro propio nombre como nombre de contacto
+            if (name && jid && jid !== sessions[accountId].sock?.user?.id?.split(':')[0] + '@s.whatsapp.net') {
                 sessions[accountId].contactNamesByJid[jid] = name
                 const rawNum = jid.split('@')[0].split(':')[0]
                 if (rawNum && /^\d+$/.test(rawNum) && isPnUser(jid)) {
@@ -332,6 +352,11 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
         if (contacts && contacts.length > 0) {
             console.log(`[${accountId}] 📥 Sincronizando ${contacts.length} contactos desde historial... (isLatest: ${isLatest})`)
             mergeContactNames(contacts)
+        }
+
+        if (chats && chats.length > 0) {
+            console.log(`[${accountId}] 📥 Sincronizando ${chats.length} chats desde historial...`)
+            mergeContactNames(chats) // Los chats también tienen ID y Name
         }
         
         if (messages && messages.length > 0) {
@@ -663,21 +688,23 @@ export async function handleMessages(accountId, { messages, type }, isHistory = 
             if (lidMap[originalLid]) {
                 rawNum = lidMap[originalLid]
             } else {
-                // b) Resolución nativa (v7 signal repo)
+                // b) Resolución nativa (Baileys v7 internal mapping)
                 const fullLidJid = isLidIdentity ? targetJid : `${originalLid}@lid`
                 try {
-                    const res = await sessions[accountId]?.sock?.signalRepository?.lidMapping?.getPNForLID(fullLidJid)
+                    const sock = sessions[accountId]?.sock
+                    const res = await sock?.signalRepository?.lidMapping?.getPNForLID(fullLidJid)
+                    
                     if (res) {
                         rawNum = res.split('@')[0].split(':')[0]
                         lidMap[originalLid] = rawNum
                         console.log(`[${accountId}] 🔗 LID Traducido (Nativo): ${originalLid} -> ${rawNum}`)
-                    } else if (sessions[accountId]?.sock) {
-                        // c) Resolución dinámica via onWhatsApp
-                        const results = await sessions[accountId].sock.onWhatsApp(fullLidJid)
-                        if (results && results[0]?.exists) {
+                    } else if (sock) {
+                        // c) Resolución dinámica via onWhatsApp (algunos LIDs responden aquí)
+                        const results = await sock.onWhatsApp(fullLidJid)
+                        if (results && results[0]?.exists && results[0].jid.includes('@s.whatsapp.net')) {
                             rawNum = results[0].jid.split('@')[0].split(':')[0]
                             lidMap[originalLid] = rawNum
-                            console.log(`[${accountId}] 🔄 LID Traducido (Dinámico): ${originalLid} -> ${rawNum}`)
+                            console.log(`[${accountId}] 🔄 LID Traducido (onWhatsApp): ${originalLid} -> ${rawNum}`)
                         }
                     }
                 } catch (e) {
@@ -687,7 +714,8 @@ export async function handleMessages(accountId, { messages, type }, isHistory = 
         }
 
         // 2. ACTUALIZAR CACHÉ Y NOTIFICAR AL CRM
-        const pushName = msg.pushName && String(msg.pushName).trim()
+        // Solo actualizar el nombre si el mensaje es ENTRANTE (!fromMe)
+        const pushName = !fromMe ? (msg.pushName && String(msg.pushName).trim()) : null
         const contactMap = sessions[accountId]?.contactNamesByJid
         
         if (pushName && contactMap) {
