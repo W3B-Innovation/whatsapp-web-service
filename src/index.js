@@ -10,6 +10,8 @@ app.use(express.json())
 
 // --- API Endpoints ---
 
+
+
 // Listar todas las sesiones y su configuración sugerida
 app.get('/sessions', (req, res) => {
     const sessionIds = Object.keys(sessions)
@@ -114,9 +116,9 @@ app.post('/send-message', async (req, res) => {
 // Recuperar historial de un chat específico
 app.post('/fetch-history', async (req, res) => {
     const { accountId = 'account-1', number, count = 50 } = req.body
-    
+
     console.log(`[API:FetchHistory] Recibida solicitud para ${number} (Cuenta: ${accountId}, Cantidad: ${count})`)
-    
+
     if (!number) {
         return res.status(400).json({ error: 'Faltan parámetros: number es requerido' })
     }
@@ -132,7 +134,7 @@ app.post('/fetch-history', async (req, res) => {
     try {
         const jid = number.includes('@') ? number : `${number}@s.whatsapp.net`
         const companyId = sessions[accountId]?.companyId || null
-        
+
         const result = await fetchAndSyncHistory(sock, accountId, companyId, jid, count)
         res.json(result)
     } catch (error) {
