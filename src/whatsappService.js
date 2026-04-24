@@ -561,8 +561,8 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
 
     // Escuchar mensajes entrantes
     sock.ev.on('messages.upsert', async (upsert) => {
-        if (upsert.type === 'append') {
-            console.log(`[${accountId}] 📥 Recibidos mensajes vía upsert(append). Count: ${upsert.messages.length}`)
+        if (upsert.messages?.length > 0) {
+            console.log(`[${accountId}] 📥 Evento messages.upsert: Tipo=${upsert.type}, Cantidad=${upsert.messages.length}, Primero=${upsert.messages[0].key.remoteJid}`);
         }
         await handleMessages(accountId, upsert, upsert.type === 'append')
     })

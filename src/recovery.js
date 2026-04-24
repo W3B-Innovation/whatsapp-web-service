@@ -51,15 +51,21 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
         }
 
         // Si no tenemos un mensaje de ancla, Baileys v7 a veces falla con {id: ''}.
-        // Intentamos enviar una clave mínima pero válida si no se provee una.
+        // Generamos un ID que parezca real de WhatsApp (20 hex chars) para evitar rechazos
+        const fakeId = [...Array(20)].map(() => Math.floor(Math.random() * 16).toString(16)).join('').toUpperCase();
+        
         const anchorKey = { 
             remoteJid: targetJid, 
             fromMe: false, 
-            id: 'SYNC_' + Date.now() // Un ID ficticio para forzar la petición si no hay mensajes
+            id: fakeId
         };
 
         // El timestamp debe estar en segundos para Baileys v7
-        const timestampSeconds = Math.floor(Date.now() / 1000);
+        // Si pedimos historial, debemos usar un timestamp pasado (ej: 30 días) si queremos ver lo anterior.
+        const timestampSeconds = Math.floor(Date.now() / 1000) - (60 * 60 * 24 * 30);
+        
+        console.log(`[${accountId}] 📡 Enviando fetchMessageHistory para ${targetJid}...`);
+        console.log(`[${accountId}] 🔍 Parámetros: Count=${countNum}, AnchorID=${fakeId}, Since=${new Date(timestampSeconds * 1000).toISOString()}`);
         
         await sock.fetchMessageHistory(countNum, anchorKey, timestampSeconds);
         
