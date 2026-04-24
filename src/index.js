@@ -12,16 +12,16 @@ app.use(express.json())
 
 // Listar todas las sesiones y su configuración sugerida
 app.get('/sessions', (req, res) => {
-    const slots = [1, 2, 3, 4, 5].map(id => {
-        const accountId = `account-${id}`
+    const sessionIds = Object.keys(sessions)
+    const results = sessionIds.map(id => {
         return {
-            id: accountId,
-            status: getStatus(accountId),
-            hasQr: !!getLastQr(accountId),
-            number: getNumber(accountId)
+            id,
+            status: getStatus(id),
+            hasQr: !!getLastQr(id),
+            number: getNumber(id)
         }
     })
-    res.json(slots)
+    res.json(results)
 })
 
 // Nuevo endpoint para monitorear el consumo de recursos

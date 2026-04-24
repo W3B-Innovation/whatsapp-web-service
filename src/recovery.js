@@ -1,4 +1,5 @@
 import fetch from 'node-fetch'
+import { sessions } from './whatsappService.js'
 
 /**
  * Solicita el historial de mensajes al teléfono.
@@ -22,12 +23,30 @@ export async function fetchAndSyncHistory(sock, accountId, companyId, jid, count
         let targetJid = jid;
         if (jid.includes('@lid')) {
             const rawLid = jid.split('@')[0];
-            const mapped = sessions[accountId]?.contactLids?.[rawLid];
+            let mapped = sessions[accountId]?.contactLids?.[rawLid];
+            
+            // Si no está en caché, intentamos resolución nativa (Baileys v7)
+            if (!mapped && sock.pnFromLIDUSync) {
+                try {
+                    console.log(`[${accountId}] 🔍 Resolviendo LID nativamente para historial: ${jid}`);
+                    const results = await sock.pnFromLIDUSync([jid]);
+                    if (results && results[jid]) {
+                        mapped = results[jid].split('@')[0];
+                        // Guardar en caché para futuras referencias
+                        if (!sessions[accountId].contactLids) sessions[accountId].contactLids = {};
+                        sessions[accountId].contactLids[rawLid] = mapped;
+                        console.log(`[${accountId}] 🔗 LID Resuelto (Nativo): ${rawLid} -> ${mapped}`);
+                    }
+                } catch (e) {
+                    console.error(`[${accountId}] Error en pnFromLIDUSync:`, e.message);
+                }
+            }
+
             if (mapped) {
                 targetJid = `${mapped}@s.whatsapp.net`;
                 console.log(`[${accountId}] 🔄 Usando PN resuelto para historial: ${targetJid}`);
             } else {
-                console.warn(`[${accountId}] ⚠️ Intentando recuperar historial de un LID no resuelto: ${jid}. Podría fallar.`);
+                console.warn(`[${accountId}] ⚠️ No se pudo resolver el LID ${jid}. La solicitud de historial probablemente fallará.`);
             }
         }
 
