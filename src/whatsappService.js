@@ -330,18 +330,14 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
     sock.ev.on('contacts.update', mergeContactNames)
     sock.ev.on('messaging-history.set', async ({ contacts, messages, chats, isLatest }) => {
         if (contacts && contacts.length > 0) {
-            console.log(`[${accountId}] 📥 Sincronizando ${contacts.length} contactos desde historial...`)
+            console.log(`[${accountId}] 📥 Sincronizando ${contacts.length} contactos desde historial... (isLatest: ${isLatest})`)
             mergeContactNames(contacts)
         }
         
         if (messages && messages.length > 0) {
             console.log(`[${accountId}] 📥 Procesando ${messages.length} mensajes desde historial...`)
-            // Procesar mensajes históricos de forma secuencial pero eficiente
-            for (const msg of messages) {
-                await sendToWebhook(accountId, msg, true).catch(err => 
-                    console.error(`[${accountId}] Error procesando mensaje histórico:`, err.message)
-                )
-            }
+            // Usamos handleMessages para que se aplique la resolución de LID/PN
+            await handleMessages(accountId, { messages, type: 'notify' }, true)
             console.log(`[${accountId}] ✅ Historial procesado.`)
         }
     })
@@ -528,7 +524,10 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
 
     // Escuchar mensajes entrantes
     sock.ev.on('messages.upsert', async (upsert) => {
-        handleMessages(accountId, upsert)
+        if (upsert.type === 'append') {
+            console.log(`[${accountId}] 📥 Recibidos mensajes vía upsert(append). Count: ${upsert.messages.length}`)
+        }
+        await handleMessages(accountId, upsert, upsert.type === 'append')
     })
 
     // Escuchar actualizaciones de estado (entregado, leído, etc.)
@@ -636,8 +635,8 @@ async function getProfilePic(accountId, jid) {
 /**
  * Función independiente para procesar mensajes entrantes y salientes
  */
-export async function handleMessages(accountId, { messages, type }) {
-    if (type !== 'notify') return
+export async function handleMessages(accountId, { messages, type }, isHistory = false) {
+    if (type !== 'notify' && type !== 'append') return
 
     for (const msg of messages) {
         const fromMe = msg.key.fromMe
@@ -723,7 +722,7 @@ export async function handleMessages(accountId, { messages, type }) {
         }
 
         // 3. CONTINUAR CON PROCESAMIENTO LEGADO (Bitend, etc.)
-        await sendToWebhook(accountId, msg)
+        await sendToWebhook(accountId, msg, isHistory)
     }
 }
 
