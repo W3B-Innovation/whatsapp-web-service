@@ -12,8 +12,6 @@ app.use(cors())
 
 // --- API Endpoints ---
 
-
-
 // Listar todas las sesiones y su configuración sugerida
 app.get('/sessions', (req, res) => {
     const sessionIds = Object.keys(sessions)
