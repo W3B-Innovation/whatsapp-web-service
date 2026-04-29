@@ -896,18 +896,40 @@ export async function resolveGroupInfo(accountId = 'default', url) {
         let targetUrl = url
         // 1. Seguir redirecciones si no es un link directo de WhatsApp
         if (!url.includes('chat.whatsapp.com')) {
-            const response = await fetch(url, { method: 'GET', redirect: 'follow' })
+            const response = await fetch(url, { 
+                method: 'GET', 
+                redirect: 'follow',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+            })
             targetUrl = response.url
             
             // Si el destino final tampoco es chat.whatsapp.com, intentar buscar el link en el HTML
-            // (Útil para páginas intermedias como las de Sendflow que pueden no redireccionar por HTTP)
             if (!targetUrl.includes('chat.whatsapp.com')) {
                 const html = await response.text()
-                const match = html.match(/https:\/\/chat\.whatsapp\.com\/([a-zA-Z0-9]+)/)
-                if (match) {
-                    targetUrl = match[0]
+                // Busqueda más agresiva de patrones de invitación de WA
+                const patterns = [
+                    /https:\/\/chat\.whatsapp\.com\/([a-zA-Z0-9]{20,25})/, // Link estándar
+                    /chat\.whatsapp\.com\/invite\/([a-zA-Z0-9]{20,25})/,    // Formato invite
+                    /\"(https:\/\/chat\.whatsapp\.com\/[^\"]+)\"/           // Link entre comillas
+                ]
+                
+                let found = null
+                for (const p of patterns) {
+                    const match = html.match(p)
+                    if (match) {
+                        found = match[1] || match[0]
+                        if (!found.startsWith('http')) found = 'https://' + found
+                        break
+                    }
+                }
+
+                if (found) {
+                    targetUrl = found
                 } else {
-                    throw new Error('No se pudo encontrar un enlace de invitación de WhatsApp válido en el destino.')
+                    console.log(`[${accountId}] [resolve-group] HTML no contenía link de WA. Preview: ${html.substring(0, 200)}`)
+                    throw new Error('No se pudo encontrar un enlace de WhatsApp en el destino de Sendflow.')
                 }
             }
         }
