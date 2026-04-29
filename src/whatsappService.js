@@ -73,16 +73,16 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
 
     const { remoteJid, fromMe, participant } = msg.key
     const rawNum = remoteJid.split('@')[0].split(':')[0]
-    
+
     // 1. RESOLVER JID Y LID (Baileys v7)
     let targetJid = remoteJid
     let originalLid = null
     const isLidIdentity = remoteJid.includes('@lid')
-    
+
     if (isLidIdentity) {
         originalLid = rawNum
         let mapped = session.contactLids[originalLid]
-        
+
         // v7: Intentar resolución nativa si no hay mapeo en caché
         if (!mapped && session.sock?.signalRepository?.lidMapping) {
             try {
@@ -154,7 +154,7 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
         }
 
         const webhookUrl = process.env.CRM_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
-        
+
         try {
             if (isHistory) {
                 console.log(`[${accountId}] 🕒 Enviando HISTORIAL al CRM: ${finalCleanNumber} (${text.substring(0, 20)}...)`)
@@ -175,7 +175,7 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
                     pushName: (() => {
                         const map = session.contactNamesByJid || {}
                         const cachedName = map[remoteJid] || map[`${finalCleanNumber}@s.whatsapp.net`]
-                        
+
                         // Si el mensaje es entrante, capturar el pushName del remitente
                         if (!fromMe) {
                             const inboundName = msg.pushName && String(msg.pushName).trim()
@@ -185,7 +185,7 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
                                 return inboundName
                             }
                         }
-                        
+
                         // Si el mensaje es saliente o no tiene pushName entrante, usar el caché (que debería tener el nombre del contacto)
                         // NUNCA devolver el pushName del mensaje si fromMe es true, porque sería nuestro propio nombre.
                         return cachedName || null
@@ -237,7 +237,29 @@ export function getGlobalStats(companyId = null) {
         totalSessions: Object.keys(sessions).length
     }
 }
+/**
+    * Envía un webhook al CRM informando que se ha descubierto o actualizado el nombre de un contacto.
+    */
+async function notifyNameUpdate(accountId, phoneNumber, userName) {
+    const soyAndradeWebhook = process.env.SOYANDRADE_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
+    try {
+        // Evitar spam de actualizaciones si el nombre es redundante
+        // (Opcional: podrías implementar un pequeño caché de 'nombres ya enviados' aquí)
 
+        fetch(soyAndradeWebhook, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: 'name_update',
+                accountId,
+                companyId: sessions[accountId]?.companyId || null,
+                phoneNumber,
+                userName,
+                timestamp: Date.now()
+            })
+        }).catch(() => { }) // Silencioso
+    } catch (e) { }
+}
 export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM') {
     // Inicializar sesión si no existe
     if (!sessions[accountId]) {
@@ -255,7 +277,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
     // SIEMPRE actualizar companyId y browserName si se proveen
     if (companyId) sessions[accountId].companyId = companyId
     if (browserName) sessions[accountId].browserName = browserName
-    
+
     savePersistentSessions()
 
     if (!sessions[accountId].contactNamesByJid) sessions[accountId].contactNamesByJid = {}
@@ -299,12 +321,11 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
         logger: pino({ level: 'silent' }),
         browser: [sessions[accountId].browserName, 'Chrome', '1.0.0'],
         connectTimeoutMs: 60000,
-        syncFullHistory: true, // Habilitar para permitir recuperación de historial completo
+        syncFullHistory: false, // DESACTIVADO: No recuperar historial completo al conectar
         markOnlineOnConnect: false,
         linkPreviewImageThumbnailWidth: 192,
-        // IMPORTANTE: Debe ser true para que fetchMessageHistory funcione.
-        // Si es false, Baileys ignora los paquetes de historial enviados por WhatsApp.
-        shouldSyncHistoryMessage: () => true,
+        // DESACTIVADO: Evita que Baileys procese los paquetes de historial.
+        shouldSyncHistoryMessage: () => false,
         // Ayuda a Baileys a recuperar contenido de mensajes si es necesario
         getMessage: async (key) => {
             return {
@@ -370,12 +391,12 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
             console.log(`[${accountId}] 📥 Sincronizando ${chats.length} chats desde historial...`)
             mergeContactNames(chats) // Los chats también tienen ID y Name
         }
-        
+
         if (messages && messages.length > 0) {
-            console.log(`[${accountId}] 📥 Procesando ${messages.length} mensajes desde historial...`)
-            // Usamos handleMessages para que se aplique la resolución de LID/PN
-            await handleMessages(accountId, { messages, type: 'notify' }, true)
-            console.log(`[${accountId}] ✅ Historial procesado.`)
+            // DESACTIVADO: Ya no procesamos mensajes de historial para enviarlos al CRM
+            // console.log(`[${accountId}] 📥 Procesando ${messages.length} mensajes desde historial...`)
+            // await handleMessages(accountId, { messages, type: 'notify' }, true)
+            // console.log(`[${accountId}] ✅ Historial procesado.`)
         }
     })
 
@@ -456,22 +477,21 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
     sock.ev.on('group-participants.update', async (update) => {
         const { id, participants, action } = update
 
-        if (action === 'add') {
+        if (action === 'add' || action === 'remove' || action === 'leave') {
             const accountId = Object.keys(sessions).find(aid => sessions[aid].sock === sock) || 'unknown'
-            console.log(`[${accountId}] 👥 Nuevos participantes detectados en ${id}`)
+            const isJoin = action === 'add'
+            
+            console.log(`[${accountId}] 👥 Cambio en participantes (${action}) detectado en ${id}`)
 
             let groupName = 'Grupo Desconocido'
             try {
-                // Intentar obtener metadata fresca para el nombre del grupo
                 const metadata = await sock.groupMetadata(id)
                 groupName = metadata.subject || groupName
-                console.log(`[${accountId}] ✅ Procesando ingresos en el grupo: "${groupName}"`)
+                console.log(`[${accountId}] ✅ Procesando ${isJoin ? 'ingresos' : 'salidas'} en el grupo: "${groupName}"`)
             } catch (err) {
                 console.error(`[${accountId}] Error obteniendo metadata del grupo ${id}:`, err.message)
-                // Continuamos aunque falle el nombre, el ID se mantiene
             }
 
-            // Mapear participantes para extraer número y buscar nombre en el caché si existe
             const enrichedParticipants = (await Promise.all(participants.map(async (p) => {
                 const jid = (typeof p === 'string') ? p : (p.phoneNumber || p.id || '')
                 if (!jid) return null
@@ -480,7 +500,6 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
                 const isLid = jid.includes('@lid')
                 const lidMap = sessions[accountId]?.contactLids || {}
 
-                // RESOLUCIÓN FORZADA AL ENTRAR
                 if (isLid || rawNum.length > 13) {
                     if (lidMap[rawNum]) {
                         rawNum = lidMap[rawNum]
@@ -491,7 +510,6 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
                                 const resolvedPn = results[0].jid.split('@')[0].split(':')[0]
                                 if (resolvedPn && /^\d+$/.test(resolvedPn)) {
                                     lidMap[rawNum] = resolvedPn
-                                    console.log(`[${accountId}] 🤝 Identidad resuelta al entrar: ${rawNum} -> ${resolvedPn}`)
                                     rawNum = resolvedPn
                                 }
                             }
@@ -501,44 +519,27 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
 
                 const contactMap = sessions[accountId]?.contactNamesByJid || {}
                 const cleanNumber = rawNum.replace(/^(\d{2})1(\d{10})$/, '$1$2')
-                const with1Number = rawNum.length === 12 ? rawNum.replace(/^(\d{2})(\d{10})$/, '$11$2') : rawNum
-
+                
                 let userName = contactMap[jid] ||
                     contactMap[`${rawNum}@s.whatsapp.net`] ||
-                    contactMap[`${cleanNumber}@s.whatsapp.net`] ||
-                    contactMap[`${with1Number}@s.whatsapp.net`] ||
-                    contactMap[rawNum] ||
-                    contactMap[cleanNumber]
-
-                if (!userName) {
-                    try {
-                        const metadata = await sock.groupMetadata(id)
-                        const part = metadata.participants.find(part =>
-                            part.id === jid || part.id.includes(cleanNumber) || part.id.includes(rawNum)
-                        )
-                        if (part && (part.name || part.notify)) userName = part.name || part.notify
-                    } catch (e) { }
-                }
-
-                console.log(`[${accountId}] 🔍 Integrante: ${rawNum} (${userName || 'Nuevo Usuario'})`)
+                    contactMap[rawNum]
 
                 return {
                     phoneNumber: rawNum,
-                    userName: userName || 'Nuevo Usuario'
+                    userName: userName || 'Usuario'
                 }
             }))).filter(p => p !== null)
 
-            // Enviar exclusivamente a SoyAndrade vía Webhook
             const soyAndradeWebhook = process.env.SOYANDRADE_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
             const companyId = sessions[accountId]?.companyId || null
 
             try {
-                console.log(`[${accountId}] 📡 Enviando lead de grupo a SoyAndrade: ${soyAndradeWebhook}`)
-                const response = await fetch(soyAndradeWebhook, {
+                await fetch(soyAndradeWebhook, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        type: 'group_join',
+                        type: isJoin ? 'group_join' : 'group_leave',
+                        action: action, // 'add', 'remove', 'leave'
                         accountId,
                         companyId,
                         groupId: id,
@@ -547,14 +548,9 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
                         timestamp: Date.now()
                     })
                 })
-
-                if (response.ok) {
-                    console.log(`[${accountId}] ✅ Lead registrado con éxito en SoyAndrade.`)
-                } else {
-                    console.error(`[${accountId}] ⚠️  SoyAndrade respondió con error (${response.status})`)
-                }
+                console.log(`[${accountId}] ✅ Evento '${action}' enviado a SoyAndrade.`)
             } catch (err) {
-                console.error(`[${accountId}] ❌ Error conectando con el webhook de SoyAndrade:`, err.message)
+                console.error(`[${accountId}] ❌ Error enviando webhook de grupo:`, err.message)
             }
         }
     })
@@ -674,7 +670,7 @@ async function getProfilePic(accountId, jid) {
  */
 export async function handleMessages(accountId, { messages, type }, isHistory = false) {
     if (type !== 'notify' && type !== 'append') return
-    
+
     // Si el tipo es 'append', casi con seguridad es historial solicitado
     const finalIsHistory = isHistory || type === 'append'
 
@@ -697,7 +693,7 @@ export async function handleMessages(accountId, { messages, type }, isHistory = 
         // Intentar resolver el teléfono si es un LID o número muy largo
         if (isLidIdentity || rawNum.length > 13) {
             const originalLid = rawNum
-            
+
             // Re-intento de resolución:
             if (lidMap[originalLid]) {
                 rawNum = lidMap[originalLid]
@@ -706,7 +702,7 @@ export async function handleMessages(accountId, { messages, type }, isHistory = 
                 try {
                     const sock = sessions[accountId]?.sock
                     const res = await sock?.signalRepository?.lidMapping?.getPNForLID(fullLidJid)
-                    
+
                     if (res) {
                         rawNum = res.split('@')[0].split(':')[0]
                         lidMap[originalLid] = rawNum
@@ -721,7 +717,7 @@ export async function handleMessages(accountId, { messages, type }, isHistory = 
                     }
                 } catch (e) { }
             }
-            
+
             // Actualizar el remoteJid del mensaje para que el webhook use el número real
             if (rawNum && rawNum.length < 14) {
                 msg.key.remoteJid = `${rawNum}@s.whatsapp.net`
@@ -815,6 +811,127 @@ export async function logout(accountId = 'default') {
         } catch (e) {
             console.error(`[${accountId}] Error eliminando carpeta de auth:`, e.message)
         }
+    }
+}
+
+/**
+ * Obtiene todos los grupos donde la cuenta está participando.
+ * Marca si la cuenta es el Owner (creador).
+ */
+export async function getGroups(accountId = 'default') {
+    const session = sessions[accountId]
+    if (!session || !session.sock || session.connectionStatus !== 'open') {
+        throw new Error(`WhatsApp no está conectado para la cuenta ${accountId}`)
+    }
+
+    try {
+        console.log(`[${accountId}] Consultando grupos donde soy administrador...`)
+        const groups = await session.sock.groupFetchAllParticipating()
+        const myJid = session.sock.user.id.split(':')[0] + '@s.whatsapp.net'
+        const myBareId = session.sock.user.id.split(':')[0]
+
+        const filtered = []
+        const groupList = Object.values(groups)
+
+        console.log(`[DEBUG:Groups] Mi ID base: ${myBareId}. Iniciando procesamiento de ${groupList.length} grupos...`)
+
+        for (const g of groupList) {
+            try {
+                const metadata = g
+                const ownerJid = metadata.owner || (metadata.id.includes('-') ? metadata.id.split('-')[0] + '@s.whatsapp.net' : null)
+                
+                filtered.push({
+                    id: metadata.id,
+                    subject: metadata.subject,
+                    owner: ownerJid,
+                    creation: metadata.creation,
+                    size: metadata.participants?.length || 0,
+                    isOwner: ownerJid === myJid || metadata.id.startsWith(myBareId)
+                })
+            } catch (err) {
+                console.error(`[DEBUG:Groups] ❌ Error en grupo "${g.subject || g.id}":`, err.message)
+            }
+        }
+
+        console.log(`[DEBUG:Groups] Fin del proceso. Enviando ${filtered.length} grupos al front.`)
+        return filtered.sort((a, b) => b.creation - a.creation)
+
+    } catch (err) {
+        console.error(`[${accountId}] Error al obtener grupos:`, err.message)
+        throw err
+    }
+}
+
+/**
+ * Genera o recupera el código de invitación de un grupo.
+ */
+export async function getGroupInvite(accountId = 'default', groupId) {
+    const session = sessions[accountId]
+    if (!session || !session.sock || session.connectionStatus !== 'open') {
+        throw new Error(`WhatsApp no está conectado para la cuenta ${accountId}`)
+    }
+
+    try {
+        console.log(`[${accountId}] Obteniendo código de invitación para ${groupId}...`)
+        const code = await session.sock.groupInviteCode(groupId)
+        return `https://chat.whatsapp.com/${code}`
+    } catch (err) {
+        console.error(`[${accountId}] Error al obtener link de invitación:`, err.message)
+        throw err
+    }
+}
+
+/**
+ * Resuelve un enlace (posiblemente con redirecciones) para obtener la información del grupo de WhatsApp.
+ */
+export async function resolveGroupInfo(accountId = 'default', url) {
+    const session = sessions[accountId]
+    if (!session || !session.sock || session.connectionStatus !== 'open') {
+        throw new Error(`WhatsApp no está conectado para la cuenta ${accountId}`)
+    }
+
+    try {
+        console.log(`[${accountId}] Resolviendo información de grupo para: ${url}`)
+        
+        let targetUrl = url
+        // 1. Seguir redirecciones si no es un link directo de WhatsApp
+        if (!url.includes('chat.whatsapp.com')) {
+            const response = await fetch(url, { method: 'GET', redirect: 'follow' })
+            targetUrl = response.url
+            
+            // Si el destino final tampoco es chat.whatsapp.com, intentar buscar el link en el HTML
+            // (Útil para páginas intermedias como las de Sendflow que pueden no redireccionar por HTTP)
+            if (!targetUrl.includes('chat.whatsapp.com')) {
+                const html = await response.text()
+                const match = html.match(/https:\/\/chat\.whatsapp\.com\/([a-zA-Z0-9]+)/)
+                if (match) {
+                    targetUrl = match[0]
+                } else {
+                    throw new Error('No se pudo encontrar un enlace de invitación de WhatsApp válido en el destino.')
+                }
+            }
+        }
+
+        // 2. Extraer el código de invitación
+        const code = targetUrl.split('chat.whatsapp.com/')[1]?.split('?')[0]
+        if (!code) throw new Error('Código de invitación no encontrado en la URL.')
+
+        // 3. Obtener metadata de WhatsApp
+        const info = await session.sock.groupGetInviteInfo(code)
+        
+        return {
+            id: info.id,
+            subject: info.subject,
+            owner: info.owner,
+            creation: info.creation,
+            size: info.size,
+            desc: info.desc,
+            inviteCode: code,
+            finalUrl: `https://chat.whatsapp.com/${code}`
+        }
+    } catch (err) {
+        console.error(`[${accountId}] Error resolviendo grupo desde link:`, err.message)
+        throw err
     }
 }
 

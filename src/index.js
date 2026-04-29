@@ -1,12 +1,14 @@
 import 'dotenv/config'
 import express from 'express'
-import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions } from './whatsappService.js'
+import cors from 'cors'
+import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions, getGroups, getGroupInvite, resolveGroupInfo } from './whatsappService.js'
 import { fetchAndSyncHistory } from './recovery.js'
 
 const app = express()
 const PORT = process.env.PORT || 4000
 
 app.use(express.json())
+app.use(cors())
 
 // --- API Endpoints ---
 
@@ -55,6 +57,50 @@ app.get('/status', (req, res) => {
         qr: getLastQr(accountId),
         number: getNumber(accountId)
     })
+})
+
+// Obtener lista de grupos de una cuenta
+app.get('/groups', async (req, res) => {
+    const accountId = req.query.accountId || 'account-1'
+    try {
+        const groups = await getGroups(accountId)
+        res.json(groups)
+    } catch (error) {
+        console.error(`[${accountId}] Error en /groups:`, error.message)
+        const status = getStatus(accountId)
+        if (status !== 'open') {
+            return res.status(503).json({ error: `WhatsApp (${accountId}) no está conectado.` })
+        }
+        res.status(500).json({ error: 'Error al obtener grupos' })
+    }
+})
+
+// Obtener link de invitación de un grupo
+app.get('/group-invite', async (req, res) => {
+    const { accountId = 'account-1', groupId } = req.query
+    if (!groupId) return res.status(400).json({ error: 'groupId es requerido' })
+
+    try {
+        const link = await getGroupInvite(accountId, groupId)
+        res.json({ link })
+    } catch (error) {
+        console.error(`[${accountId}] Error en /group-invite:`, error.message)
+        res.status(500).json({ error: 'Error al obtener link del grupo' })
+    }
+})
+
+// Resolver información de grupo desde cualquier link (soporta Sendflow)
+app.get('/resolve-group', async (req, res) => {
+    const { accountId = 'account-1', url } = req.query
+    if (!url) return res.status(400).json({ error: 'url es requerida' })
+
+    try {
+        const info = await resolveGroupInfo(accountId, url)
+        res.json(info)
+    } catch (error) {
+        console.error(`[${accountId}] Error en /resolve-group:`, error.message)
+        res.status(500).json({ error: error.message })
+    }
 })
 
 // Iniciar conexión manualmente para una cuenta específica
@@ -114,6 +160,8 @@ app.post('/send-message', async (req, res) => {
 })
 
 // Recuperar historial de un chat específico
+/** 
+ * ENDPOINT DESACTIVADO - Ya no se usa la recuperación de historial
 app.post('/fetch-history', async (req, res) => {
     const { accountId = 'account-1', number, count = 50 } = req.body
 
@@ -142,6 +190,7 @@ app.post('/fetch-history', async (req, res) => {
         res.status(500).json({ error: error.message })
     }
 })
+*/
 
 // [TEST ONLY] Simula un cierre de WebSocket para probar la reconexión automática (428)
 app.post('/test-disconnect', (req, res) => {
