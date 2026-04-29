@@ -910,32 +910,30 @@ export async function resolveGroupInfo(accountId = 'default', url) {
                 const html = await response.text()
                 // Busqueda más agresiva de patrones de invitación de WA
                 const patterns = [
-                    /https:\/\/chat\.whatsapp\.com\/([a-zA-Z0-9]{20,25})/, // Link estándar
-                    /chat\.whatsapp\.com\/invite\/([a-zA-Z0-9]{20,25})/,    // Formato invite
-                    /\"(https:\/\/chat\.whatsapp\.com\/[^\"]+)\"/           // Link entre comillas
+                    /chat\.whatsapp\.com\/([a-zA-Z0-9]{20,30})/, // Captura el código directamente
+                    /chat\.whatsapp\.com\/invite\/([a-zA-Z0-9]{20,30})/
                 ]
                 
-                let found = null
+                let foundCode = null
                 for (const p of patterns) {
                     const match = html.match(p)
                     if (match) {
-                        found = match[1] || match[0]
-                        if (!found.startsWith('http')) found = 'https://' + found
+                        foundCode = match[1]
                         break
                     }
                 }
 
-                if (found) {
-                    targetUrl = found
+                if (foundCode) {
+                    targetUrl = `https://chat.whatsapp.com/${foundCode}`
                 } else {
-                    console.log(`[${accountId}] [resolve-group] HTML no contenía link de WA. Preview: ${html.substring(0, 200)}`)
+                    console.log(`[${accountId}] [resolve-group] HTML no contenía link de WA. Preview: ${html.substring(0, 300)}`)
                     throw new Error('No se pudo encontrar un enlace de WhatsApp en el destino de Sendflow.')
                 }
             }
         }
 
         // 2. Extraer el código de invitación
-        const code = targetUrl.split('chat.whatsapp.com/')[1]?.split('?')[0]
+        const code = targetUrl.split('chat.whatsapp.com/')[1]?.split('?')[0]?.replace('invite/', '')
         if (!code) throw new Error('Código de invitación no encontrado en la URL.')
 
         // 3. Obtener metadata de WhatsApp
