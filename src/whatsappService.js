@@ -187,6 +187,7 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
                     cleanNumber: finalCleanNumber,
                     text,
                     isHistory,
+                    origin: session.origin,
                     timestamp: msg.messageTimestamp,
                     pushName: (() => {
                         const map = session.contactNamesByJid || {}
@@ -271,6 +272,7 @@ async function notifyNameUpdate(accountId, phoneNumber, userName) {
                 companyId: sessions[accountId]?.companyId || null,
                 phoneNumber,
                 userName,
+                origin: sessions[accountId]?.origin || null,
                 timestamp: Date.now()
             })
         }).catch(() => { }) // Silencioso
@@ -557,9 +559,10 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         type: isJoin ? 'group_join' : 'group_leave',
-                        action: action, // 'add', 'remove', 'leave'
+                         action: action, // 'add', 'remove', 'leave'
                         accountId,
                         companyId,
+                        origin: sessions[accountId]?.origin || null,
                         groupId: id,
                         groupName,
                         participants: enrichedParticipants,
@@ -648,6 +651,7 @@ export async function handleMessageUpdates(accountId, updates) {
                     type: 'status_update',
                     accountId,
                     companyId,
+                    origin: sessions[accountId]?.origin || null,
                     messageId,
                     status: statusString,
                     remoteJid,
