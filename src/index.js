@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
-import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions, getGroups, getGroupInvite, resolveGroupInfo } from './whatsappService.js'
+import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions, getGroups, getGroupInvite, resolveGroupInfo, updateSessionConfig } from './whatsappService.js'
 import { fetchAndSyncHistory } from './recovery.js'
 
 const app = express()
@@ -70,7 +70,9 @@ app.get('/sessions', (req, res) => {
             hasQr: !!getLastQr(id),
             number: getNumber(id),
             origin: sessions[id]?.origin || null,
-            companyId: sessions[id]?.companyId || null
+            companyId: sessions[id]?.companyId || null,
+            activeGroupId: sessions[id]?.activeGroupId || null,
+            activeGroupName: sessions[id]?.activeGroupName || null
         }
     })
     res.json(results)
@@ -105,8 +107,23 @@ app.get('/status', (req, res) => {
         qr: getLastQr(accountId),
         number: getNumber(accountId),
         origin: sessions[accountId]?.origin || null,
-        companyId: sessions[accountId]?.companyId || null
+        companyId: sessions[accountId]?.companyId || null,
+        activeGroupId: sessions[accountId]?.activeGroupId || null,
+        activeGroupName: sessions[accountId]?.activeGroupName || null
     })
+})
+
+// Actualizar configuración de una sesión
+app.post('/update-config', (req, res) => {
+    const { accountId, companyId, origin, activeGroupId, activeGroupName } = req.body
+    if (!accountId) return res.status(400).json({ error: 'accountId es requerido' })
+
+    const success = updateSessionConfig(accountId, { companyId, origin, activeGroupId, activeGroupName })
+    if (success) {
+        res.json({ success: true, message: `Configuración de ${accountId} actualizada.` })
+    } else {
+        res.status(404).json({ error: `Sesión ${accountId} no encontrada.` })
+    }
 })
 
 // Obtener lista de grupos de una cuenta

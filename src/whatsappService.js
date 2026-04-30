@@ -24,6 +24,8 @@ function loadPersistentSessions() {
                         contactNamesByJid: {},
                         contactLids: {},
                         origin: null,
+                        activeGroupId: null,
+                        activeGroupName: null,
                         ...data[id]
                     }
                 } else {
@@ -44,7 +46,9 @@ function savePersistentSessions() {
             metadata[id] = {
                 companyId: sessions[id].companyId,
                 number: sessions[id].number,
-                origin: sessions[id].origin
+                origin: sessions[id].origin,
+                activeGroupId: sessions[id].activeGroupId,
+                activeGroupName: sessions[id].activeGroupName
             }
         }
         fs.writeFileSync(SESSIONS_FILE, JSON.stringify(metadata, null, 2))
@@ -278,7 +282,7 @@ async function notifyNameUpdate(accountId, phoneNumber, userName) {
         }).catch(() => { }) // Silencioso
     } catch (e) { }
 }
-export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM', origin = null) {
+export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM', origin = null, activeGroupId = null, activeGroupName = null) {
     // Inicializar sesión si no existe
     if (!sessions[accountId]) {
         sessions[accountId] = {
@@ -289,7 +293,9 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
             browserName: browserName, // Guardar preferencia de nombre
             contactNamesByJid: {}, // Caché: JID -> nombre del contacto
             contactLids: {},
-            origin: origin
+            origin: origin,
+            activeGroupId: activeGroupId,
+            activeGroupName: activeGroupName
         }
     }
 
@@ -297,6 +303,8 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
     if (companyId) sessions[accountId].companyId = companyId
     if (browserName) sessions[accountId].browserName = browserName
     if (origin) sessions[accountId].origin = origin
+    if (activeGroupId) sessions[accountId].activeGroupId = activeGroupId
+    if (activeGroupName) sessions[accountId].activeGroupName = activeGroupName
 
     savePersistentSessions()
 
@@ -996,6 +1004,23 @@ export async function resolveGroupInfo(accountId = 'default', url) {
         console.error(`[${accountId}] ❌ Error en resolveGroupInfo:`, err.message)
         throw err
     }
+}
+
+}
+
+/**
+ * Actualiza la configuración de una sesión existente
+ */
+export function updateSessionConfig(accountId, config) {
+    if (!sessions[accountId]) return false
+    
+    if (config.companyId !== undefined) sessions[accountId].companyId = config.companyId
+    if (config.origin !== undefined) sessions[accountId].origin = config.origin
+    if (config.activeGroupId !== undefined) sessions[accountId].activeGroupId = config.activeGroupId
+    if (config.activeGroupName !== undefined) sessions[accountId].activeGroupName = config.activeGroupName
+    
+    savePersistentSessions()
+    return true
 }
 
 // Inicializar sesiones existentes al arrancar
