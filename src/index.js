@@ -68,7 +68,9 @@ app.get('/sessions', (req, res) => {
             id,
             status: getStatus(id),
             hasQr: !!getLastQr(id),
-            number: getNumber(id)
+            number: getNumber(id),
+            origin: sessions[id]?.origin || null,
+            companyId: sessions[id]?.companyId || null
         }
     })
     res.json(results)
@@ -101,7 +103,9 @@ app.get('/status', (req, res) => {
         accountId,
         status: getStatus(accountId),
         qr: getLastQr(accountId),
-        number: getNumber(accountId)
+        number: getNumber(accountId),
+        origin: sessions[accountId]?.origin || null,
+        companyId: sessions[accountId]?.companyId || null
     })
 })
 
@@ -152,7 +156,7 @@ app.get('/resolve-group', async (req, res) => {
 // Iniciar conexión manualmente para una cuenta específica
 app.post('/connect', async (req, res) => {
     let { accountId = 'account-1', companyId, browserName } = req.body
-    const origin = req.headers.origin || '';
+    const origin = req.headers.origin || req.headers.referer || 'Direct Access/Other';
 
     // Adaptar el nombre del navegador (lo que aparece en el celular) según el origen
     if (!browserName) {
