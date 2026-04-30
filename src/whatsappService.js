@@ -73,11 +73,11 @@ const globalStats = {
 function getWebhookUrl(accountId) {
     const session = sessions[accountId];
     const origin = session?.origin || '';
-    
+
     if (origin.includes('soyandrade.com') || accountId.startsWith('SOYANDRADE_')) {
         return process.env.SOYANDRADE_WEBHOOK_URL || 'https://soyandrade.com/api/whatsapp/web-sync/webhook';
     }
-    
+
     return process.env.CRM_WEBHOOK_URL || 'https://crm.bitend.ai/api/whatsapp/web-sync/webhook';
 }
 
@@ -567,7 +567,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         type: isJoin ? 'group_join' : 'group_leave',
-                         action: action, // 'add', 'remove', 'leave'
+                        action: action, // 'add', 'remove', 'leave'
                         accountId,
                         companyId,
                         origin: sessions[accountId]?.origin || null,
@@ -1006,19 +1006,18 @@ export async function resolveGroupInfo(accountId = 'default', url) {
     }
 }
 
-}
 
 /**
  * Actualiza la configuración de una sesión existente
  */
 export function updateSessionConfig(accountId, config) {
     if (!sessions[accountId]) return false
-    
+
     if (config.companyId !== undefined) sessions[accountId].companyId = config.companyId
     if (config.origin !== undefined) sessions[accountId].origin = config.origin
     if (config.activeGroupId !== undefined) sessions[accountId].activeGroupId = config.activeGroupId
     if (config.activeGroupName !== undefined) sessions[accountId].activeGroupName = config.activeGroupName
-    
+
     savePersistentSessions()
     return true
 }
