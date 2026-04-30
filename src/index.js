@@ -37,16 +37,26 @@ app.use((req, res, next) => {
     next();
 });
 
-// Middleware para normalizar accountId (quitar prefijos de CRM como SOYANDRADE_)
+// Middleware para normalizar accountId (solo si es necesario)
 app.use((req, res, next) => {
+    const normalize = (id) => {
+        if (!id) return id;
+        // Si la sesión existe con el ID original (ej. con prefijo), usar ese
+        if (sessions[id]) return id;
+        // Si no existe, intentar quitar el prefijo (compatibilidad con sesiones viejas)
+        const stripped = id.replace('SOYANDRADE_', '');
+        if (sessions[stripped]) return stripped;
+        return id;
+    };
+
     if (req.query.accountId) {
-        req.query.accountId = req.query.accountId.replace('SOYANDRADE_', '')
+        req.query.accountId = normalize(req.query.accountId);
     }
     if (req.body && req.body.accountId) {
-        req.body.accountId = req.body.accountId.replace('SOYANDRADE_', '')
+        req.body.accountId = normalize(req.body.accountId);
     }
-    next()
-})
+    next();
+});
 
 // --- API Endpoints ---
 
