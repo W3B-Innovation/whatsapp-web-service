@@ -891,26 +891,35 @@ export async function resolveGroupInfo(accountId = 'default', url) {
     }
 
     try {
-        console.log(`[${accountId}] Resolviendo información de grupo para: ${url}`)
+        // Asegurar que la URL sea absoluta
+        let normalizedUrl = url.trim()
+        if (!normalizedUrl.startsWith('http')) {
+            normalizedUrl = `https://${normalizedUrl}`
+        }
+
+        console.log(`[${accountId}] [resolve-group] Resolviendo: ${normalizedUrl}`)
         
-        let targetUrl = url
+        let targetUrl = normalizedUrl
         // 1. Seguir redirecciones si no es un link directo de WhatsApp
-        if (!url.includes('chat.whatsapp.com')) {
-            const response = await fetch(url, { 
+        if (!normalizedUrl.includes('chat.whatsapp.com')) {
+            console.log(`[${accountId}] [resolve-group] No es link directo, siguiendo redirecciones...`)
+            const response = await fetch(normalizedUrl, { 
                 method: 'GET', 
                 redirect: 'follow',
+                timeout: 10000,
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 }
             })
             targetUrl = response.url
+            console.log(`[${accountId}] [resolve-group] URL final tras redirección: ${targetUrl}`)
             
             // Si el destino final tampoco es chat.whatsapp.com, intentar buscar el link en el HTML
             if (!targetUrl.includes('chat.whatsapp.com')) {
+                console.log(`[${accountId}] [resolve-group] Buscando link en HTML...`)
                 const html = await response.text()
-                // Busqueda más agresiva de patrones de invitación de WA
                 const patterns = [
-                    /chat\.whatsapp\.com\/([a-zA-Z0-9]{20,30})/, // Captura el código directamente
+                    /chat\.whatsapp\.com\/([a-zA-Z0-9]{20,30})/,
                     /chat\.whatsapp\.com\/invite\/([a-zA-Z0-9]{20,30})/
                 ]
                 
@@ -925,19 +934,26 @@ export async function resolveGroupInfo(accountId = 'default', url) {
 
                 if (foundCode) {
                     targetUrl = `https://chat.whatsapp.com/${foundCode}`
+                    console.log(`[${accountId}] [resolve-group] Link encontrado en HTML: ${targetUrl}`)
                 } else {
-                    console.log(`[${accountId}] [resolve-group] HTML no contenía link de WA. Preview: ${html.substring(0, 300)}`)
-                    throw new Error('No se pudo encontrar un enlace de WhatsApp en el destino de Sendflow.')
+                    console.error(`[${accountId}] [resolve-group] No se encontró link en HTML.`)
+                    throw new Error('No se pudo encontrar un enlace de WhatsApp en el destino indicado.')
                 }
             }
         }
 
         // 2. Extraer el código de invitación
         const code = targetUrl.split('chat.whatsapp.com/')[1]?.split('?')[0]?.replace('invite/', '')?.replace(/\/$/, '')
-        if (!code) throw new Error('Código de invitación no encontrado en la URL.')
+        if (!code) {
+            console.error(`[${accountId}] [resolve-group] Error extrayendo código de: ${targetUrl}`)
+            throw new Error('Código de invitación no encontrado en la URL.')
+        }
 
+        console.log(`[${accountId}] [resolve-group] Obteniendo metadata de WA para el código: ${code}`)
+        
         // 3. Obtener metadata de WhatsApp
         const info = await session.sock.groupGetInviteInfo(code)
+        console.log(`[${accountId}] [resolve-group] ✅ Éxito: ${info.subject} (${info.id})`)
         
         return {
             id: info.id,
@@ -950,7 +966,7 @@ export async function resolveGroupInfo(accountId = 'default', url) {
             finalUrl: `https://chat.whatsapp.com/${code}`
         }
     } catch (err) {
-        console.error(`[${accountId}] Error resolviendo grupo desde link:`, err.message)
+        console.error(`[${accountId}] ❌ Error en resolveGroupInfo:`, err.message)
         throw err
     }
 }
