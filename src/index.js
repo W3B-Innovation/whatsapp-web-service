@@ -37,6 +37,17 @@ app.use((req, res, next) => {
     next();
 });
 
+// Middleware para normalizar accountId (quitar prefijos de CRM como SOYANDRADE_)
+app.use((req, res, next) => {
+    if (req.query.accountId) {
+        req.query.accountId = req.query.accountId.replace('SOYANDRADE_', '')
+    }
+    if (req.body && req.body.accountId) {
+        req.body.accountId = req.body.accountId.replace('SOYANDRADE_', '')
+    }
+    next()
+})
+
 // --- API Endpoints ---
 
 // Listar todas las sesiones y su configuración sugerida

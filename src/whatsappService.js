@@ -557,10 +557,10 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
 
     // Escuchar mensajes entrantes
     sock.ev.on('messages.upsert', async (upsert) => {
-        if (upsert.messages?.length > 0) {
-            console.log(`[${accountId}] 📥 Evento messages.upsert: Tipo=${upsert.type}, Cantidad=${upsert.messages.length}, Primero=${upsert.messages[0].key.remoteJid}`);
+        if (upsert.messages?.length > 0 && upsert.type === 'notify') {
+            console.log(`[${accountId}] 📥 Mensaje en tiempo real: ${upsert.messages[0].key.remoteJid}`);
+            await handleMessages(accountId, upsert, false)
         }
-        await handleMessages(accountId, upsert, upsert.type === 'append')
     })
 
     // Escuchar actualizaciones de estado (entregado, leído, etc.)
@@ -669,10 +669,10 @@ async function getProfilePic(accountId, jid) {
  * Función independiente para procesar mensajes entrantes y salientes
  */
 export async function handleMessages(accountId, { messages, type }, isHistory = false) {
-    if (type !== 'notify' && type !== 'append') return
+    if (type !== 'notify') return
 
-    // Si el tipo es 'append', casi con seguridad es historial solicitado
-    const finalIsHistory = isHistory || type === 'append'
+    // Solo procesamos mensajes en tiempo real (notify)
+    const finalIsHistory = isHistory
 
     for (const msg of messages) {
         const fromMe = msg.key.fromMe
@@ -933,7 +933,7 @@ export async function resolveGroupInfo(accountId = 'default', url) {
         }
 
         // 2. Extraer el código de invitación
-        const code = targetUrl.split('chat.whatsapp.com/')[1]?.split('?')[0]?.replace('invite/', '')
+        const code = targetUrl.split('chat.whatsapp.com/')[1]?.split('?')[0]?.replace('invite/', '')?.replace(/\/$/, '')
         if (!code) throw new Error('Código de invitación no encontrado en la URL.')
 
         // 3. Obtener metadata de WhatsApp
