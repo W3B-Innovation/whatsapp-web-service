@@ -74,10 +74,17 @@ function getWebhookUrl(accountId) {
     const session = sessions[accountId];
     const origin = session?.origin || '';
 
+    // 1. Prioridad: Subdominio específico de Códigos
+    if (origin.includes('codigos.soyandrade.com')) {
+        return process.env.CODIGOS_WEBHOOK_URL || 'https://codigos.soyandrade.com/api/whatsapp/web-sync/webhook';
+    }
+
+    // 2. Dominio principal de Soy Andrade
     if (origin.includes('soyandrade.com') || accountId.startsWith('SOYANDRADE_')) {
         return process.env.SOYANDRADE_WEBHOOK_URL || 'https://soyandrade.com/api/whatsapp/web-sync/webhook';
     }
 
+    // 3. CRM por defecto (Bitend)
     return process.env.CRM_WEBHOOK_URL || 'https://crm.bitend.ai/api/whatsapp/web-sync/webhook';
 }
 
