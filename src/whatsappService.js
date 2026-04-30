@@ -23,6 +23,7 @@ function loadPersistentSessions() {
                         lastQr: null,
                         contactNamesByJid: {},
                         contactLids: {},
+                        origin: null,
                         ...data[id]
                     }
                 } else {
@@ -42,7 +43,8 @@ function savePersistentSessions() {
         for (const id in sessions) {
             metadata[id] = {
                 companyId: sessions[id].companyId,
-                number: sessions[id].number
+                number: sessions[id].number,
+                origin: sessions[id].origin
             }
         }
         fs.writeFileSync(SESSIONS_FILE, JSON.stringify(metadata, null, 2))
@@ -59,6 +61,20 @@ const globalStats = {
     webhookSuccess: 0,
     webhookErrors: 0,
     startTime: Date.now()
+}
+
+/**
+ * Determina a qué webhook enviar la información basado en el origen de la sesión
+ */
+function getWebhookUrl(accountId) {
+    const session = sessions[accountId];
+    const origin = session?.origin || '';
+    
+    if (origin.includes('soyandrade.com') || accountId.startsWith('SOYANDRADE_')) {
+        return process.env.SOYANDRADE_WEBHOOK_URL || 'https://soyandrade.com/api/whatsapp/web-sync/webhook';
+    }
+    
+    return process.env.CRM_WEBHOOK_URL || 'https://crm.bitend.ai/api/whatsapp/web-sync/webhook';
 }
 
 // Contadores por empresa (companyId -> counters)
@@ -153,7 +169,7 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
             else companyStats[cId].messagesReceived++
         }
 
-        const webhookUrl = process.env.CRM_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
+        const webhookUrl = getWebhookUrl(accountId)
 
         try {
             if (isHistory) {
@@ -241,12 +257,12 @@ export function getGlobalStats(companyId = null) {
     * Envía un webhook al CRM informando que se ha descubierto o actualizado el nombre de un contacto.
     */
 async function notifyNameUpdate(accountId, phoneNumber, userName) {
-    const soyAndradeWebhook = process.env.SOYANDRADE_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
+    const webhookUrl = getWebhookUrl(accountId)
     try {
         // Evitar spam de actualizaciones si el nombre es redundante
         // (Opcional: podrías implementar un pequeño caché de 'nombres ya enviados' aquí)
 
-        fetch(soyAndradeWebhook, {
+        fetch(webhookUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -260,7 +276,7 @@ async function notifyNameUpdate(accountId, phoneNumber, userName) {
         }).catch(() => { }) // Silencioso
     } catch (e) { }
 }
-export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM') {
+export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM', origin = null) {
     // Inicializar sesión si no existe
     if (!sessions[accountId]) {
         sessions[accountId] = {
@@ -271,12 +287,14 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
             browserName: browserName, // Guardar preferencia de nombre
             contactNamesByJid: {}, // Caché: JID -> nombre del contacto
             contactLids: {},
+            origin: origin
         }
     }
 
-    // SIEMPRE actualizar companyId y browserName si se proveen
+    // SIEMPRE actualizar companyId, browserName y origin si se proveen
     if (companyId) sessions[accountId].companyId = companyId
     if (browserName) sessions[accountId].browserName = browserName
+    if (origin) sessions[accountId].origin = origin
 
     savePersistentSessions()
 
@@ -480,7 +498,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
         if (action === 'add' || action === 'remove' || action === 'leave') {
             const accountId = Object.keys(sessions).find(aid => sessions[aid].sock === sock) || 'unknown'
             const isJoin = action === 'add'
-            
+
             console.log(`[${accountId}] 👥 Cambio en participantes (${action}) detectado en ${id}`)
 
             let groupName = 'Grupo Desconocido'
@@ -519,7 +537,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
 
                 const contactMap = sessions[accountId]?.contactNamesByJid || {}
                 const cleanNumber = rawNum.replace(/^(\d{2})1(\d{10})$/, '$1$2')
-                
+
                 let userName = contactMap[jid] ||
                     contactMap[`${rawNum}@s.whatsapp.net`] ||
                     contactMap[rawNum]
@@ -530,11 +548,11 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
                 }
             }))).filter(p => p !== null)
 
-            const soyAndradeWebhook = process.env.SOYANDRADE_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
+            const webhookUrl = getWebhookUrl(accountId)
             const companyId = sessions[accountId]?.companyId || null
 
             try {
-                await fetch(soyAndradeWebhook, {
+                const response = await fetch(webhookUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -548,7 +566,12 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
                         timestamp: Date.now()
                     })
                 })
-                console.log(`[${accountId}] ✅ Evento '${action}' enviado a SoyAndrade.`)
+                const resBody = await response.json().catch(() => ({}));
+                if (response.ok) {
+                    console.log(`[${accountId}] ✅ Evento '${action}' enviado al CRM (${webhookUrl}). Respuesta:`, JSON.stringify(resBody));
+                } else {
+                    console.error(`[${accountId}] ❌ Error en respuesta CRM (${response.status}) en ${webhookUrl}:`, JSON.stringify(resBody));
+                }
             } catch (err) {
                 console.error(`[${accountId}] ❌ Error enviando webhook de grupo:`, err.message)
             }
@@ -614,7 +637,7 @@ export async function handleMessageUpdates(accountId, updates) {
         console.log(`[${accountId}] Actualización de estado: ${messageId} -> ${statusString}`)
 
         // Enviar al CRM vía Webhook
-        const webhookUrl = process.env.CRM_WEBHOOK_URL || 'http://localhost:3000/api/whatsapp/web-sync/webhook'
+        const webhookUrl = getWebhookUrl(accountId)
         const companyId = sessions[accountId]?.companyId || null;
 
         try {
@@ -839,7 +862,7 @@ export async function getGroups(accountId = 'default') {
             try {
                 const metadata = g
                 const ownerJid = metadata.owner || (metadata.id.includes('-') ? metadata.id.split('-')[0] + '@s.whatsapp.net' : null)
-                
+
                 filtered.push({
                     id: metadata.id,
                     subject: metadata.subject,
@@ -898,13 +921,13 @@ export async function resolveGroupInfo(accountId = 'default', url) {
         }
 
         console.log(`[${accountId}] [resolve-group] Resolviendo: ${normalizedUrl}`)
-        
+
         let targetUrl = normalizedUrl
         // 1. Seguir redirecciones si no es un link directo de WhatsApp
         if (!normalizedUrl.includes('chat.whatsapp.com')) {
             console.log(`[${accountId}] [resolve-group] No es link directo, siguiendo redirecciones...`)
-            const response = await fetch(normalizedUrl, { 
-                method: 'GET', 
+            const response = await fetch(normalizedUrl, {
+                method: 'GET',
                 redirect: 'follow',
                 timeout: 10000,
                 headers: {
@@ -913,7 +936,7 @@ export async function resolveGroupInfo(accountId = 'default', url) {
             })
             targetUrl = response.url
             console.log(`[${accountId}] [resolve-group] URL final tras redirección: ${targetUrl}`)
-            
+
             // Si el destino final tampoco es chat.whatsapp.com, intentar buscar el link en el HTML
             if (!targetUrl.includes('chat.whatsapp.com')) {
                 console.log(`[${accountId}] [resolve-group] Buscando link en HTML...`)
@@ -922,7 +945,7 @@ export async function resolveGroupInfo(accountId = 'default', url) {
                     /chat\.whatsapp\.com\/([a-zA-Z0-9]{20,30})/,
                     /chat\.whatsapp\.com\/invite\/([a-zA-Z0-9]{20,30})/
                 ]
-                
+
                 let foundCode = null
                 for (const p of patterns) {
                     const match = html.match(p)
@@ -950,11 +973,11 @@ export async function resolveGroupInfo(accountId = 'default', url) {
         }
 
         console.log(`[${accountId}] [resolve-group] Obteniendo metadata de WA para el código: ${code}`)
-        
+
         // 3. Obtener metadata de WhatsApp
         const info = await session.sock.groupGetInviteInfo(code)
         console.log(`[${accountId}] [resolve-group] ✅ Éxito: ${info.subject} (${info.id})`)
-        
+
         return {
             id: info.id,
             subject: info.subject,

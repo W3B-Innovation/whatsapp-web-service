@@ -175,7 +175,7 @@ app.post('/connect', async (req, res) => {
         return res.json({ message: `La conexión para ${accountId} ya está en proceso`, status })
     }
 
-    connectToWhatsApp(accountId, companyId, browserName).catch(err => {
+    connectToWhatsApp(accountId, companyId, browserName, origin).catch(err => {
         console.error(`Error al conectar ${accountId}:`, err)
         setStatus(accountId, 'disconnected')
     })
