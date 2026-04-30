@@ -8,7 +8,34 @@ const app = express()
 const PORT = process.env.PORT || 4000
 
 app.use(express.json())
-app.use(cors())
+
+// --- Configuración de Seguridad y Orígenes ---
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()) 
+    : ['https://crm.bitend.ai', 'https://codigos.soyandrade.com', 'https://soyandrade.com'];
+
+app.use(cors({
+    origin: (origin, callback) => {
+        // Permitir peticiones sin origen (como Postman, curl o llamadas server-to-server)
+        if (!origin) return callback(null, true);
+        
+        const isAllowed = allowedOrigins.some(o => origin.startsWith(o)) || origin.includes('localhost');
+        
+        if (isAllowed) {
+            callback(null, true);
+        } else {
+            console.error(`[Security] Bloqueado por CORS: Origen no permitido (${origin})`);
+            callback(new Error('Not allowed by CORS'));
+        }
+    }
+}));
+
+// Middleware para identificar y loguear el origen de cada petición en consola
+app.use((req, res, next) => {
+    const origin = req.headers.origin || req.headers.referer || 'Direct Access/Other';
+    console.log(`[API Request] ${new Date().toLocaleTimeString()} | ${req.method} ${req.path} | Origin: ${origin}`);
+    next();
+});
 
 // --- API Endpoints ---
 
@@ -103,7 +130,20 @@ app.get('/resolve-group', async (req, res) => {
 
 // Iniciar conexión manualmente para una cuenta específica
 app.post('/connect', async (req, res) => {
-    const { accountId = 'account-1', companyId, browserName } = req.body
+    let { accountId = 'account-1', companyId, browserName } = req.body
+    const origin = req.headers.origin || '';
+
+    // Adaptar el nombre del navegador (lo que aparece en el celular) según el origen
+    if (!browserName) {
+        if (origin.includes('bitend.ai')) {
+            browserName = 'Bitend AI CRM';
+        } else if (origin.includes('soyandrade.com')) {
+            browserName = 'Soy Andrade CRM';
+        } else {
+            browserName = 'WhatsApp Sync Service';
+        }
+    }
+
     const status = getStatus(accountId)
 
     if (status === 'open') {
