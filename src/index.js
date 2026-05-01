@@ -109,7 +109,9 @@ app.get('/status', (req, res) => {
         origin: sessions[accountId]?.origin || null,
         companyId: sessions[accountId]?.companyId || null,
         activeGroupId: sessions[accountId]?.activeGroupId || null,
-        activeGroupName: sessions[accountId]?.activeGroupName || null
+        activeGroupName: sessions[accountId]?.activeGroupName || null,
+        duplicateConflictId: sessions[accountId]?.duplicateConflictId || null,
+        duplicateConflictOrigin: sessions[accountId]?.duplicateConflictOrigin || null
     })
 })
 

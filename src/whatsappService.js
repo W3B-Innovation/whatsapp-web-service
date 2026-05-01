@@ -448,6 +448,12 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
             const statusCode = lastDisconnect?.error?.output?.statusCode
             console.log(`[${accountId}] Conexión cerrada. Código: ${statusCode}`)
 
+            // Si fue un logout intencional por duplicado, no reintentar
+            if (sessions[accountId].connectionStatus === 'error_duplicate_number') {
+                console.log(`[${accountId}] 🛑 Logout por duplicado completado.`)
+                return
+            }
+
             sessions[accountId].sock = null
             sessions[accountId].number = null
             sessions[accountId].lastQr = null
@@ -500,9 +506,35 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
         } else if (connection === 'open') {
             const userJid = sock.user?.id || ''
             const cleanNumber = userJid.split(':')[0].split('@')[0]
+            
+            // VALIDACIÓN: Evitar números duplicados en diferentes cuentas
+            const otherAccountId = Object.keys(sessions).find(id => 
+                id !== accountId && 
+                sessions[id].number === cleanNumber && 
+                sessions[id].connectionStatus === 'open'
+            )
+
+            if (otherAccountId) {
+                console.log(`[${accountId}] ⚠️ CONFLICTO: El número ${cleanNumber} ya está vinculado a '${otherAccountId}'. Cerrando sesión...`)
+                
+                sessions[accountId].connectionStatus = 'error_duplicate_number'
+                sessions[accountId].duplicateConflictId = otherAccountId
+                sessions[accountId].duplicateConflictOrigin = sessions[otherAccountId].origin || 'Otro CRM'
+                
+                try {
+                    await sock.logout() // Desvincular el nuevo intento inmediatamente
+                } catch (e) {
+                    console.error(`[${accountId}] Error en logout por duplicado:`, e.message)
+                }
+                return
+            }
+
             sessions[accountId].connectionStatus = 'open'
             sessions[accountId].lastQr = null
             sessions[accountId].number = cleanNumber
+            sessions[accountId].duplicateConflictId = null // Limpiar conflictos anteriores
+            sessions[accountId].duplicateConflictOrigin = null
+            
             savePersistentSessions()
             console.log(`[${accountId}] ✅ ¡Conectado exitosamente! Número: ${cleanNumber}`)
         }
