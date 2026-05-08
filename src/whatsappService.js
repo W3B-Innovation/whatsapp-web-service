@@ -506,21 +506,21 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
         } else if (connection === 'open') {
             const userJid = sock.user?.id || ''
             const cleanNumber = userJid.split(':')[0].split('@')[0]
-            
+
             // VALIDACIÓN: Evitar números duplicados en diferentes cuentas
-            const otherAccountId = Object.keys(sessions).find(id => 
-                id !== accountId && 
-                sessions[id].number === cleanNumber && 
+            const otherAccountId = Object.keys(sessions).find(id =>
+                id !== accountId &&
+                sessions[id].number === cleanNumber &&
                 sessions[id].connectionStatus === 'open'
             )
 
             if (otherAccountId) {
                 console.log(`[${accountId}] ⚠️ CONFLICTO: El número ${cleanNumber} ya está vinculado a '${otherAccountId}'. Cerrando sesión...`)
-                
+
                 sessions[accountId].connectionStatus = 'error_duplicate_number'
                 sessions[accountId].duplicateConflictId = otherAccountId
                 sessions[accountId].duplicateConflictOrigin = sessions[otherAccountId].origin || 'Otro CRM'
-                
+
                 try {
                     await sock.logout() // Desvincular el nuevo intento inmediatamente
                 } catch (e) {
@@ -534,7 +534,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
             sessions[accountId].number = cleanNumber
             sessions[accountId].duplicateConflictId = null // Limpiar conflictos anteriores
             sessions[accountId].duplicateConflictOrigin = null
-            
+
             savePersistentSessions()
             console.log(`[${accountId}] ✅ ¡Conectado exitosamente! Número: ${cleanNumber}`)
         }
@@ -836,7 +836,7 @@ export function getNumber(accountId = 'default') {
     return sessions[accountId]?.number || null
 }
 
-export async function sendMessage(accountId = 'default', number, message) {
+export async function sendMessage(accountId = 'default', number, message, media = null) {
     const session = sessions[accountId]
     if (!session || !session.sock || session.connectionStatus !== 'open') {
         throw new Error(`WhatsApp no está conectado para la cuenta ${accountId}`)
@@ -850,7 +850,23 @@ export async function sendMessage(accountId = 'default', number, message) {
 
     // Baileys v7+: Usar isPnUser para validación lógica
     const isPn = isPnUser(jid)
-    console.log(`[${accountId}] Enviando a JID resolved: ${jid} (isPn: ${isPn})`)
+    
+    if (media && media.url) {
+        console.log(`[${accountId}] Enviando MULTIMEDIA (${media.type}) a JID resolved: ${jid}`)
+        const mediaContent = { url: media.url };
+        const messageOptions = {
+            caption: message,
+            mimetype: media.type === 'video' ? 'video/mp4' : 'image/jpeg'
+        };
+
+        if (media.type === 'video') {
+            return await session.sock.sendMessage(jid, { video: mediaContent, ...messageOptions });
+        } else {
+            return await session.sock.sendMessage(jid, { image: mediaContent, ...messageOptions });
+        }
+    }
+
+    console.log(`[${accountId}] Enviando TEXTO a JID resolved: ${jid} (isPn: ${isPn})`)
     return await session.sock.sendMessage(jid, { text: message })
 }
 

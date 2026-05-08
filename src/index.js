@@ -10,17 +10,17 @@ const PORT = process.env.PORT || 4000
 app.use(express.json())
 
 // --- Configuración de Seguridad y Orígenes ---
-const allowedOrigins = process.env.ALLOWED_ORIGINS 
-    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()) 
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
     : ['https://crm.bitend.ai', 'https://codigos.soyandrade.com', 'https://soyandrade.com'];
 
 app.use(cors({
     origin: (origin, callback) => {
         // Permitir peticiones sin origen (como Postman, curl o llamadas server-to-server)
         if (!origin) return callback(null, true);
-        
+
         const isAllowed = allowedOrigins.some(o => origin.startsWith(o)) || origin.includes('localhost');
-        
+
         if (isAllowed) {
             callback(null, true);
         } else {
@@ -220,14 +220,14 @@ app.post('/logout', async (req, res) => {
 
 // Enviar un mensaje usando una cuenta específica
 app.post('/send-message', async (req, res) => {
-    const { accountId = 'account-1', number, message } = req.body
+    const { accountId = 'account-1', number, message, media } = req.body
 
-    if (!number || !message) {
-        return res.status(400).json({ error: 'Faltan parámetros: number y message' })
+    if (!number || (!message && !media)) {
+        return res.status(400).json({ error: 'Faltan parámetros: number y (message o media)' })
     }
 
     try {
-        const result = await sendMessage(accountId, number, message)
+        const result = await sendMessage(accountId, number, message, media)
         res.json({ success: true, result })
     } catch (error) {
         console.error(`[${accountId}] Error al enviar mensaje:`, error.message)
