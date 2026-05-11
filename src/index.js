@@ -241,6 +241,36 @@ app.post('/send-message', async (req, res) => {
     }
 })
 
+// Nuevo endpoint para envíos masivos (procesamiento en fondo real)
+app.post('/bulk-send', async (req, res) => {
+    const { accountId, message, contacts, bulkMessageId, customTemplate, webhookUrl } = req.body
+
+    if (!accountId || !message || !contacts || !bulkMessageId) {
+        return res.status(400).json({ error: 'Faltan parámetros requeridos para el envío masivo' })
+    }
+
+    // Importación dinámica para evitar circular dependency si la hubiera
+    const { processBulkSend } = await import('./bulkService.js')
+
+    // Lanzar en fondo y responder inmediatamente
+    processBulkSend({ 
+        accountId, 
+        message, 
+        contacts, 
+        bulkMessageId, 
+        customTemplate, 
+        webhookUrl 
+    }).catch(err => {
+        console.error(`[Bulk Error] Fatal en proceso de fondo para ${bulkMessageId}:`, err.message)
+    })
+
+    res.json({ 
+        success: true, 
+        message: 'Proceso de envío masivo iniciado en segundo plano.',
+        bulkMessageId 
+    })
+})
+
 // Recuperar historial de un chat específico
 /** 
  * ENDPOINT DESACTIVADO - Ya no se usa la recuperación de historial

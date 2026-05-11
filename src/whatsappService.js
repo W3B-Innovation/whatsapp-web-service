@@ -850,7 +850,23 @@ export async function sendMessage(accountId = 'default', number, message, media 
 
     // Baileys v7+: Usar isPnUser para validación lógica
     const isPn = isPnUser(jid)
-    
+
+    // Para números PNI (isPn: true), resolver el JID real con onWhatsApp()
+    // Esto es necesario porque WhatsApp migró a un sistema de identidad basado en número de teléfono
+    if (isPn && !jid.includes('@lid')) {
+        try {
+            const [result] = await session.sock.onWhatsApp(jid)
+            if (result?.exists && result?.jid) {
+                console.log(`[${accountId}] JID resuelto via onWhatsApp: ${jid} → ${result.jid}`)
+                jid = result.jid
+            } else {
+                console.warn(`[${accountId}] onWhatsApp: número ${number} no encontrado en WhatsApp. JID original: ${jid}`)
+            }
+        } catch (err) {
+            console.warn(`[${accountId}] onWhatsApp falló para ${number}, usando JID original. Error: ${err.message}`)
+        }
+    }
+
     if (media && media.url) {
         console.log(`[${accountId}] Enviando MULTIMEDIA (${media.type}) a JID resolved: ${jid}`)
         const mediaContent = { url: media.url };
