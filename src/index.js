@@ -243,7 +243,7 @@ app.post('/send-message', async (req, res) => {
 
 // Nuevo endpoint para envíos masivos (procesamiento en fondo real)
 app.post('/bulk-send', async (req, res) => {
-    const { accountId, message, contacts, bulkMessageId, customTemplate, webhookUrl } = req.body
+    const { accountId, companyId, message, contacts, bulkMessageId, customTemplate, webhookUrl } = req.body
 
     if (!accountId || !message || !contacts || !bulkMessageId) {
         return res.status(400).json({ error: 'Faltan parámetros requeridos para el envío masivo' })
@@ -255,6 +255,7 @@ app.post('/bulk-send', async (req, res) => {
     // Lanzar en fondo y responder inmediatamente
     processBulkSend({ 
         accountId, 
+        companyId,
         message, 
         contacts, 
         bulkMessageId, 
