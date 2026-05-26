@@ -105,6 +105,7 @@ app.get('/status', (req, res) => {
         accountId,
         status: getStatus(accountId),
         qr: getLastQr(accountId),
+        pairingCode: sessions[accountId]?.lastPairingCode || null,
         number: getNumber(accountId),
         origin: sessions[accountId]?.origin || null,
         companyId: sessions[accountId]?.companyId || null,
@@ -174,7 +175,7 @@ app.get('/resolve-group', async (req, res) => {
 
 // Iniciar conexión manualmente para una cuenta específica
 app.post('/connect', async (req, res) => {
-    let { accountId = 'account-1', companyId, browserName } = req.body
+    let { accountId = 'account-1', companyId, browserName, phoneNumber } = req.body
     const origin = req.headers.origin || req.headers.referer || 'Direct Access/Other';
 
     // Adaptar el nombre del navegador (lo que aparece en el celular) según el origen
@@ -194,11 +195,11 @@ app.post('/connect', async (req, res) => {
         return res.json({ message: `La cuenta ${accountId} ya está conectada`, status })
     }
 
-    if (status === 'connecting' || status === 'qr_ready') {
+    if (status === 'connecting' || status === 'qr_ready' || status === 'pairing_code_ready') {
         return res.json({ message: `La conexión para ${accountId} ya está en proceso`, status })
     }
 
-    connectToWhatsApp(accountId, companyId, browserName, origin).catch(err => {
+    connectToWhatsApp(accountId, companyId, browserName, origin, null, null, phoneNumber).catch(err => {
         console.error(`Error al conectar ${accountId}:`, err)
         setStatus(accountId, 'disconnected')
     })

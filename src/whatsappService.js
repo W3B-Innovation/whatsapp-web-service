@@ -1,4 +1,4 @@
-import { DisconnectReason, makeWASocket, useMultiFileAuthState, downloadMediaMessage, fetchLatestWaWebVersion, isPnUser } from '@whiskeysockets/baileys'
+import { DisconnectReason, makeWASocket, useMultiFileAuthState, downloadMediaMessage, fetchLatestWaWebVersion, isPnUser, Browsers } from '@whiskeysockets/baileys'
 import pino from 'pino'
 import fs from 'fs'
 import fetch from 'node-fetch'
@@ -289,13 +289,16 @@ async function notifyNameUpdate(accountId, phoneNumber, userName) {
         }).catch(() => { }) // Silencioso
     } catch (e) { }
 }
-export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM', origin = null, activeGroupId = null, activeGroupName = null) {
+export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM', origin = null, activeGroupId = null, activeGroupName = null, phoneNumber = null) {
+    let pairingCodeRequested = false
     // Inicializar sesión si no existe
     if (!sessions[accountId]) {
         sessions[accountId] = {
             sock: null,
             connectionStatus: 'disconnected',
             lastQr: null,
+            lastPairingCode: null,
+            usePairingCode: !!phoneNumber,
             companyId: companyId,
             browserName: browserName, // Guardar preferencia de nombre
             contactNamesByJid: {}, // Caché: JID -> nombre del contacto
@@ -318,14 +321,17 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
     if (!sessions[accountId].contactNamesByJid) sessions[accountId].contactNamesByJid = {}
     if (!sessions[accountId].contactLids) sessions[accountId].contactLids = {}
 
-    // Bloquear si ya hay una conexión activa o en progreso
+    // Bloquear si ya hay una conexión activa o en progreso (excepto si estamos reintentando/actualizando con número)
     const currentStatus = sessions[accountId].connectionStatus
-    if (currentStatus === 'open' || currentStatus === 'connecting' || currentStatus === 'qr_ready') {
-        console.log(`[${accountId}] Bloqueando: ya hay una conexión en estado '${currentStatus}'.`)
+    if (currentStatus === 'open' || currentStatus === 'connecting' || currentStatus === 'qr_ready' || currentStatus === 'pairing_code_ready') {
+        console.log(`[${accountId}] Bloqueando o actualizando: ya hay una conexión en estado '${currentStatus}'.`)
         return
     }
 
+    sessions[accountId].usePairingCode = !!phoneNumber
     sessions[accountId].connectionStatus = 'connecting'
+    sessions[accountId].lastQr = null
+    sessions[accountId].lastPairingCode = null
     console.log(`[${accountId}] [MANUAL] Iniciando conexión con nombre: ${sessions[accountId].browserName}...`)
 
     // Limpieza de carpetas corruptas (sin creds.json)
@@ -354,7 +360,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: [sessions[accountId].browserName, 'Chrome', '1.0.0'],
+        browser: (phoneNumber || sessions[accountId]?.usePairingCode) ? Browsers.macOS('Chrome') : [sessions[accountId].browserName, 'Chrome', '1.0.0'],
         connectTimeoutMs: 60000,
         syncFullHistory: false, // DESACTIVADO: No recuperar historial completo al conectar
         markOnlineOnConnect: false,
@@ -373,6 +379,8 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
     if (!sessions[accountId].contactNamesByJid) sessions[accountId].contactNamesByJid = {}
     if (!sessions[accountId].contactLids) sessions[accountId].contactLids = {}
     sock.ev.on('creds.update', saveCreds)
+
+
 
     // Baileys v7.0.0+: Escuchar actualizaciones de mapeo LID <-> PN
     sock.ev.on('lid-mapping.update', (mappings) => {
@@ -438,7 +446,34 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update
 
+        // Generar el código de emparejamiento si se requiere (Siguiendo la guía de Baileys)
+        if (phoneNumber && !state.creds.me && !pairingCodeRequested && (connection === 'connecting' || qr)) {
+            pairingCodeRequested = true
+            console.log(`[${accountId}] Detectada fase de conexión/QR para código de emparejamiento. Esperando 3 segundos...`)
+            setTimeout(async () => {
+                try {
+                    console.log(`[${accountId}] Asegurando que el socket esté completamente abierto antes de solicitar código...`)
+                    await sock.waitForSocketOpen()
+                    const cleanPhone = phoneNumber.replace(/\D/g, '')
+                    console.log(`[${accountId}] Solicitando código de emparejamiento oficial de Baileys para: ${cleanPhone}...`)
+                    const code = await sock.requestPairingCode(cleanPhone)
+                    sessions[accountId].lastPairingCode = code
+                    sessions[accountId].connectionStatus = 'pairing_code_ready'
+                    console.log(`[${accountId}] Código de emparejamiento generado con éxito: ${code}`)
+                } catch (err) {
+                    console.error(`[${accountId}] Error solicitando código de emparejamiento en connection.update:`, err.message)
+                    sessions[accountId].connectionStatus = 'disconnected'
+                    sessions[accountId].lastPairingCode = null
+                    pairingCodeRequested = false // Permitir reintento si falla
+                }
+            }, 3000)
+        }
+
         if (qr) {
+            if (sessions[accountId].usePairingCode) {
+                console.log(`[${accountId}] Ignorando evento QR ya que la sesión está configurada para vincularse por código de teléfono.`)
+                return
+            }
             sessions[accountId].connectionStatus = 'qr_ready'
             sessions[accountId].lastQr = qr
             console.log(`[${accountId}] QR listo — disponible para el CRM via /status`)
@@ -531,6 +566,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
 
             sessions[accountId].connectionStatus = 'open'
             sessions[accountId].lastQr = null
+            sessions[accountId].lastPairingCode = null
             sessions[accountId].number = cleanNumber
             sessions[accountId].duplicateConflictId = null // Limpiar conflictos anteriores
             sessions[accountId].duplicateConflictOrigin = null
