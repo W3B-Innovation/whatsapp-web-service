@@ -24,7 +24,7 @@ app.use(cors({
         if (isAllowed) {
             callback(null, true);
         } else {
-            console.error(`[Security] Bloqueado por CORS: Origen no permitido (${origin})`);
+            console.error(`[Security] Bloqueado por CORS: Origen no permitido::: (${origin})`);
             callback(new Error('Not allowed by CORS'));
         }
     }
@@ -254,22 +254,22 @@ app.post('/bulk-send', async (req, res) => {
     const { processBulkSend } = await import('./bulkService.js')
 
     // Lanzar en fondo y responder inmediatamente
-    processBulkSend({ 
-        accountId, 
+    processBulkSend({
+        accountId,
         companyId,
-        message, 
-        contacts, 
-        bulkMessageId, 
-        customTemplate, 
-        webhookUrl 
+        message,
+        contacts,
+        bulkMessageId,
+        customTemplate,
+        webhookUrl
     }).catch(err => {
         console.error(`[Bulk Error] Fatal en proceso de fondo para ${bulkMessageId}:`, err.message)
     })
 
-    res.json({ 
-        success: true, 
+    res.json({
+        success: true,
         message: 'Proceso de envío masivo iniciado en segundo plano.',
-        bulkMessageId 
+        bulkMessageId
     })
 })
 
