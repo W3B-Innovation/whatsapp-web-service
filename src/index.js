@@ -3,6 +3,7 @@ import express from 'express'
 import cors from 'cors'
 import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions, getGroups, getGroupInvite, resolveGroupInfo, updateSessionConfig } from './whatsappService.js'
 import { fetchAndSyncHistory } from './recovery.js'
+import { activeCampaigns } from './bulkService.js'
 
 const app = express()
 const PORT = process.env.PORT || 4000
@@ -271,6 +272,34 @@ app.post('/bulk-send', async (req, res) => {
         message: 'Proceso de envío masivo iniciado en segundo plano.',
         bulkMessageId
     })
+})
+
+// Endpoint para pausar envío masivo
+app.post('/bulk-send/pause', (req, res) => {
+    const { bulkMessageId } = req.body
+    if (!bulkMessageId) return res.status(400).json({ error: 'bulkMessageId es requerido' })
+
+    const campaign = activeCampaigns.get(bulkMessageId)
+    if (campaign) {
+        campaign.paused = true
+        console.log(`[Bulk Control] Solicitud de pausa recibida para campaña: ${bulkMessageId}`)
+        return res.json({ success: true, message: `Pausa solicitada para campaña ${bulkMessageId}.` })
+    }
+    res.status(404).json({ error: 'Campaña no activa en este microservicio.' })
+})
+
+// Endpoint para cancelar envío masivo
+app.post('/bulk-send/cancel', (req, res) => {
+    const { bulkMessageId } = req.body
+    if (!bulkMessageId) return res.status(400).json({ error: 'bulkMessageId es requerido' })
+
+    const campaign = activeCampaigns.get(bulkMessageId)
+    if (campaign) {
+        campaign.cancelled = true
+        console.log(`[Bulk Control] Solicitud de cancelación recibida para campaña: ${bulkMessageId}`)
+        return res.json({ success: true, message: `Cancelación solicitada para campaña ${bulkMessageId}.` })
+    }
+    res.status(404).json({ error: 'Campaña no activa en este microservicio.' })
 })
 
 // Recuperar historial de un chat específico

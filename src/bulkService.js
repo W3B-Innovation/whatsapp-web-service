@@ -35,6 +35,8 @@ async function updateBulkProgress(webhookUrl, payload) {
     }
 }
 
+export const activeCampaigns = new Map();
+
 /**
  * Procesa el envío masivo en bucle con goteo (drip feeding)
  */
@@ -43,11 +45,32 @@ export async function processBulkSend(data) {
     
     console.log(`[Bulk] 🚀 Iniciando campaña ${bulkMessageId} para ${contacts.length} contactos en la sesión ${accountId}`);
 
+    // Registrar campaña activa
+    activeCampaigns.set(bulkMessageId, { status: 'sending', paused: false, cancelled: false });
+
     let sentCount = 0;
     let failedCount = 0;
     const results = [];
 
     for (let i = 0; i < contacts.length; i++) {
+        // Verificar si la campaña fue cancelada o pausada
+        const campaignState = activeCampaigns.get(bulkMessageId);
+        if (campaignState && (campaignState.paused || campaignState.cancelled)) {
+            const finalStatus = campaignState.paused ? 'paused' : 'cancelled';
+            console.log(`[Bulk] Campaña ${bulkMessageId} interrumpida en microservicio. Estado: ${finalStatus}`);
+            
+            await updateBulkProgress(webhookUrl, {
+                bulkMessageId,
+                sentCount,
+                failedCount,
+                results: results.slice(-10),
+                status: finalStatus
+            });
+            
+            activeCampaigns.delete(bulkMessageId);
+            return;
+        }
+
         const contact = contacts[i];
         
         // Procesar mensaje (reemplazar variables)
@@ -137,5 +160,6 @@ export async function processBulkSend(data) {
         }
     }
 
+    activeCampaigns.delete(bulkMessageId);
     console.log(`[Bulk] ✅ Campaña ${bulkMessageId} finalizada: ${sentCount} OK, ${failedCount} ERR`);
 }
