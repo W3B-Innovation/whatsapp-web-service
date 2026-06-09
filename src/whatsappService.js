@@ -98,6 +98,14 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
     const session = sessions[accountId]
     if (!session || !session.sock) return
 
+    // Ignorar mensajes de sistema o protocolo (como desactivar mensajes temporales, reportes de claves, stubs, etc.)
+    const messageType = Object.keys(msg.message || {})[0] || 'unknown'
+    const ignoredTypes = ['protocolMessage', 'senderKeyDistributionMessage', 'senderKeyReportMessage']
+    if (ignoredTypes.includes(messageType) || msg.messageStubType) {
+        console.log(`[${accountId}] 🚫 Ignorando mensaje de sistema/protocolo (${messageType || msg.messageStubType})`)
+        return
+    }
+
     const { remoteJid, fromMe, participant } = msg.key
     const rawNum = remoteJid.split('@')[0].split(':')[0]
 
@@ -141,7 +149,6 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
     if (isSelfChat && fromMe) return
 
     // 3. MEDIA Y TEXTO
-    const messageType = Object.keys(msg.message || {})[0] || 'unknown'
     const hasMedia = ['imageMessage', 'videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(messageType)
 
     let mediaBase64 = null
@@ -182,6 +189,13 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
 
         const webhookUrl = getWebhookUrl(accountId)
 
+        let profilePicUrl = null
+        try {
+            profilePicUrl = await getProfilePic(accountId, remoteJid)
+        } catch (e) {
+            console.warn(`[${accountId}] Error obteniendo foto de perfil para ${remoteJid}:`, e.message)
+        }
+
         try {
             if (isHistory) {
                 console.log(`[${accountId}] 🕒 Enviando HISTORIAL al CRM: ${finalCleanNumber} (${text.substring(0, 20)}...)`)
@@ -196,6 +210,7 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
                     fromMe,
                     remoteJid,
                     cleanNumber: finalCleanNumber,
+                    profilePicUrl,
                     text,
                     isHistory,
                     origin: session.origin,

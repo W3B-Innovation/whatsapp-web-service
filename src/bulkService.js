@@ -1,8 +1,8 @@
 import { sendMessage } from './whatsappService.js'
 import fetch from 'node-fetch'
 
-const MIN_DELAY = 5000;   // 5 segundos mínimo
-const MAX_DELAY = 15000;  // 15 segundos máximo
+const MIN_DELAY = 25000;   // 25 segundos mínimo
+const MAX_DELAY = 40000;  // 40 segundos máximo
 const BATCH_SIZE = 15;    // Cada 15 mensajes se hace una pausa larga
 const BATCH_PAUSE = 60000; // 1 minuto de pausa entre bloques
 
