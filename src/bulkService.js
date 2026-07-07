@@ -13,6 +13,24 @@ function getRandomDelay() {
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
+ * Resuelve expresiones de Spintax en el texto, seleccionando aleatoriamente
+ * una opción de cada grupo delimitado por llaves `{}` y separado por `|`.
+ * Soporta anidación.
+ */
+function resolveSpintax(text) {
+    if (!text) return '';
+    let result = text;
+    const regex = /\{([^{}]+)\}/;
+    while (regex.test(result)) {
+        result = result.replace(regex, (match, choices) => {
+            const options = choices.split('|');
+            return options[Math.floor(Math.random() * options.length)];
+        });
+    }
+    return result;
+}
+
+/**
  * Reporta el progreso de vuelta al CRM vía el webhook ya existente
  */
 async function updateBulkProgress(webhookUrl, payload) {
@@ -75,8 +93,11 @@ export async function processBulkSend(data) {
         
         // Procesar mensaje (reemplazar variables)
         const name = contact.name || 'Cliente';
-        const personalizedMessage = message.replace(/\{\{nombre\}\}/gi, name)
+        let personalizedMessage = message.replace(/\{\{nombre\}\}/gi, name)
                                            .replace(/\{\{name\}\}/gi, name);
+        
+        // Resolver variaciones de texto (Spintax)
+        personalizedMessage = resolveSpintax(personalizedMessage);
         
         const cleanNumber = contact.phoneNumber.replace(/\D/g, '');
 
