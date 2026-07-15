@@ -18,9 +18,8 @@
   "author": "W3B Innovation",
   "license": "UNLICENSED",
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "@whiskeysockets/baileys": "^7.0.0-rc13",
     "@wppconnect-team/wppconnect": "^1.37.9",
-    "baileys": "^7.0.0-rc.9",
     "cors": "^2.8.6",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
