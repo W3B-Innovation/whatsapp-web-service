@@ -74,6 +74,18 @@ function getWebhookUrl(accountId) {
     const session = sessions[accountId];
     const origin = session?.origin || '';
 
+    // Detectar OmniRest por origen, variables o si el accountId es un UUID
+    const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(accountId);
+    if (
+        origin.includes('automata.bitend.ai') ||
+        origin.includes('carlee-noncultivable-alta.ngrok-free.dev') ||
+        origin.includes('localhost:4200') ||
+        origin.includes('localhost:8080') ||
+        isUuid
+    ) {
+        return process.env.OMNIREST_WEBHOOK_URL;
+    }
+
     // 1. Prioridad: Subdominio específico de Códigos
     if (origin.includes('codigos.soyandrade.com')) {
         return process.env.CODIGOS_WEBHOOK_URL || 'https://codigos.soyandrade.com/api/whatsapp/web-sync/webhook';
@@ -199,6 +211,49 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
         try {
             if (isHistory) {
                 console.log(`[${accountId}] 🕒 Enviando HISTORIAL al CRM: ${finalCleanNumber} (${text.substring(0, 20)}...)`)
+            }
+
+            if (webhookUrl === process.env.OMNIREST_WEBHOOK_URL) {
+                if (fromMe) {
+                    console.log(`[${accountId}] 🚫 Ignorando mensaje saliente para OmniRest webhook (fromMe es true)`)
+                    return
+                }
+
+                const resolvedPushName = (() => {
+                    const map = session.contactNamesByJid || {}
+                    const cachedName = map[remoteJid] || map[`${finalCleanNumber}@s.whatsapp.net`]
+                    if (!fromMe) {
+                        const inboundName = msg.pushName && String(msg.pushName).trim()
+                        if (inboundName) {
+                            map[remoteJid] = inboundName
+                            map[`${finalCleanNumber}@s.whatsapp.net`] = inboundName
+                            return inboundName
+                        }
+                    }
+                    return cachedName || null
+                })()
+
+                const response = await fetch(webhookUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        "whatsapp_number": finalCleanNumber,
+                        "message": text,
+                        "branch_id": session.companyId || accountId,
+                        "profileName": resolvedPushName
+                    })
+                })
+
+                if (!response.ok) {
+                    globalStats.webhookErrors++
+                    if (cId && companyStats[cId]) companyStats[cId].webhookErrors++
+                    const errorBody = await response.text().catch(() => 'No body')
+                    console.error(`[${accountId}] Error webhook (${response.status}): ${errorBody}`)
+                } else {
+                    globalStats.webhookSuccess++
+                    if (cId && companyStats[cId]) companyStats[cId].webhookSuccess++
+                }
+                return
             }
 
             const response = await fetch(webhookUrl, {

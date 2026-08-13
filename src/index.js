@@ -4,6 +4,7 @@ import cors from 'cors'
 import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions, getGroups, getGroupInvite, resolveGroupInfo, updateSessionConfig } from './whatsappService.js'
 import { fetchAndSyncHistory } from './recovery.js'
 import { activeCampaigns } from './bulkService.js'
+import { setupSwagger } from './swagger.js'
 
 const app = express()
 const PORT = process.env.PORT || 4000
@@ -58,6 +59,9 @@ app.use((req, res, next) => {
     }
     next();
 });
+
+// --- Swagger API Documentation ---
+setupSwagger(app)
 
 // --- API Endpoints ---
 
