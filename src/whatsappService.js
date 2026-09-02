@@ -103,6 +103,9 @@ function getWebhookUrl(accountId) {
 // Contadores por empresa (companyId -> counters)
 const companyStats = {}
 
+// Buffer global para agrupar mensajes de clientes antes de enviarlos a n8n
+const messageBuffer = {}
+
 /**
  * Función centralizada para enviar mensajes al CRM
  */
@@ -233,27 +236,73 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
                     return cachedName || null
                 })()
 
-                const response = await fetch(webhookUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        "whatsapp_number": finalCleanNumber,
-                        "message": text,
-                        "branch_id": session.companyId || accountId,
-                        "profileName": resolvedPushName
-                    })
-                })
-
-                if (!response.ok) {
-                    globalStats.webhookErrors++
-                    if (cId && companyStats[cId]) companyStats[cId].webhookErrors++
-                    const errorBody = await response.text().catch(() => 'No body')
-                    console.error(`[${accountId}] Error webhook (${response.status}): ${errorBody}`)
-                } else {
-                    globalStats.webhookSuccess++
-                    if (cId && companyStats[cId]) companyStats[cId].webhookSuccess++
+                // Inicializar buffer para el número si no existe
+                if (!messageBuffer[finalCleanNumber]) {
+                    messageBuffer[finalCleanNumber] = {
+                        messages: [],
+                        timeout: null,
+                        accountId: accountId,
+                        companyId: session.companyId || null,
+                        profileName: resolvedPushName
+                    };
                 }
-                return
+
+                // Actualizar nombre de perfil si llega uno nuevo
+                if (resolvedPushName) {
+                    messageBuffer[finalCleanNumber].profileName = resolvedPushName;
+                }
+
+                // Guardar texto si no está vacío
+                if (text && text.trim()) {
+                    messageBuffer[finalCleanNumber].messages.push(text.trim());
+                }
+
+                // Cancelar temporizador previo
+                if (messageBuffer[finalCleanNumber].timeout) {
+                    clearTimeout(messageBuffer[finalCleanNumber].timeout);
+                }
+
+                // Programar temporizador de 5 segundos
+                messageBuffer[finalCleanNumber].timeout = setTimeout(async () => {
+                    // Extraer datos y limpiar el buffer para este número
+                    const bufferData = messageBuffer[finalCleanNumber];
+                    delete messageBuffer[finalCleanNumber];
+
+                    if (!bufferData || bufferData.messages.length === 0) return;
+
+                    const concatenatedMessage = bufferData.messages.join('\n');
+
+                    try {
+                        console.log(`[${bufferData.accountId}] 🚀 Enviando ${bufferData.messages.length} mensajes agrupados de ${finalCleanNumber} a n8n`);
+                        const response = await fetch(webhookUrl, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                "whatsapp_number": finalCleanNumber,
+                                "message": concatenatedMessage,
+                                "branch_id": bufferData.companyId || bufferData.accountId,
+                                "profileName": bufferData.profileName
+                            })
+                        });
+
+                        const cId = bufferData.companyId;
+                        if (!response.ok) {
+                            globalStats.webhookErrors++;
+                            if (cId && companyStats[cId]) companyStats[cId].webhookErrors++;
+                            const errorBody = await response.text().catch(() => 'No body');
+                            console.error(`[${bufferData.accountId}] Error en webhook n8n agrupado (${response.status}): ${errorBody}`);
+                        } else {
+                            globalStats.webhookSuccess++;
+                            if (cId && companyStats[cId]) companyStats[cId].webhookSuccess++;
+                            console.log(`[${bufferData.accountId}] ✅ Mensajes agrupados enviados a n8n para ${finalCleanNumber}`);
+                        }
+                    } catch (err) {
+                        globalStats.webhookErrors++;
+                        console.error(`[${bufferData.accountId}] Error al enviar webhook n8n para ${finalCleanNumber}:`, err.message);
+                    }
+                }, 5000);
+
+                return;
             }
 
             const response = await fetch(webhookUrl, {
@@ -976,15 +1025,39 @@ export async function sendMessage(accountId = 'default', number, message, media 
     if (media && media.url) {
         console.log(`[${accountId}] Enviando MULTIMEDIA (${media.type}) a JID resolved: ${jid}`)
         const mediaContent = { url: media.url };
-        const messageOptions = {
-            caption: message,
-            mimetype: media.type === 'video' ? 'video/mp4' : 'image/jpeg'
-        };
 
         if (media.type === 'video') {
-            return await session.sock.sendMessage(jid, { video: mediaContent, ...messageOptions });
+            return await session.sock.sendMessage(jid, {
+                video: mediaContent,
+                caption: message,
+                mimetype: media.mimetype || 'video/mp4'
+            });
+        } else if (media.type === 'audio') {
+            return await session.sock.sendMessage(jid, {
+                audio: mediaContent,
+                mimetype: media.mimetype || 'audio/mp4',
+                ptt: media.ptt || false
+            });
+        } else if (media.type === 'document' || media.type === 'pdf') {
+            let defaultFilename = 'documento.pdf';
+            try {
+                const urlPath = new URL(media.url).pathname;
+                const extracted = urlPath.split('/').pop();
+                if (extracted && extracted.includes('.')) defaultFilename = decodeURIComponent(extracted);
+            } catch (_) {}
+
+            return await session.sock.sendMessage(jid, {
+                document: mediaContent,
+                mimetype: media.mimetype || 'application/pdf',
+                fileName: media.fileName || media.filename || defaultFilename,
+                caption: message
+            });
         } else {
-            return await session.sock.sendMessage(jid, { image: mediaContent, ...messageOptions });
+            return await session.sock.sendMessage(jid, {
+                image: mediaContent,
+                caption: message,
+                mimetype: media.mimetype || 'image/jpeg'
+            });
         }
     }
 

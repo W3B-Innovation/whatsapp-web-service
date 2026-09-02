@@ -454,7 +454,7 @@ export const openApiSpec = {
       post: {
         tags: ["Mensajería"],
         summary: "Enviar un mensaje individual",
-        description: "Envía un mensaje de texto o multimedia (imagen/video) a un número de teléfono específico desde una de las sesiones activas.",
+        description: "Envía un mensaje de texto o multimedia (imagen/video/documento/audio) a un número de teléfono específico desde una de las sesiones activas.",
         requestBody: {
           required: true,
           content: {
@@ -482,12 +482,22 @@ export const openApiSpec = {
                     properties: {
                       url: {
                         type: "string",
-                        description: "URL pública del archivo multimedia"
+                        description: "URL pública del archivo multimedia o documento"
                       },
                       type: {
                         type: "string",
                         description: "Tipo de archivo",
-                        enum: ["image", "video"]
+                        enum: ["image", "video", "document", "pdf", "audio"]
+                      },
+                      fileName: {
+                        type: "string",
+                        description: "Nombre del archivo a mostrar (opcional para documentos/pdf)",
+                        example: "factura.pdf"
+                      },
+                      mimetype: {
+                        type: "string",
+                        description: "MIME type del archivo (opcional, p.ej. application/pdf)",
+                        example: "application/pdf"
                       }
                     }
                   }
@@ -579,8 +589,10 @@ export const openApiSpec = {
                       media: {
                         type: "object",
                         properties: {
-                          url: { type: "string" },
-                          type: { type: "string", enum: ["image", "video"] }
+                          url: { type: "string", description: "URL pública del archivo multimedia o documento" },
+                          type: { type: "string", enum: ["image", "video", "document", "pdf", "audio"] },
+                          fileName: { type: "string", description: "Nombre del archivo (opcional)", example: "factura.pdf" },
+                          mimetype: { type: "string", description: "MIME type (opcional)", example: "application/pdf" }
                         }
                       }
                     }
