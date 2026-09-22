@@ -24,6 +24,7 @@ function loadPersistentSessions() {
                         contactNamesByJid: {},
                         contactLids: {},
                         origin: null,
+                        webhookUrl: null,
                         activeGroupId: null,
                         activeGroupName: null,
                         ...data[id]
@@ -47,6 +48,7 @@ function savePersistentSessions() {
                 companyId: sessions[id].companyId,
                 number: sessions[id].number,
                 origin: sessions[id].origin,
+                webhookUrl: sessions[id].webhookUrl,
                 activeGroupId: sessions[id].activeGroupId,
                 activeGroupName: sessions[id].activeGroupName
             }
@@ -72,15 +74,26 @@ const globalStats = {
  */
 function getWebhookUrl(accountId) {
     const session = sessions[accountId];
+    // 1. Si la sesión tiene un webhookUrl explícito configurado dinámicamente, usarlo prioritariamente
+    if (session?.webhookUrl) {
+        return session.webhookUrl;
+    }
+
     const origin = session?.origin || '';
 
-    // Detectar OmniRest por origen, variables o si el accountId es un UUID
+    // 2. Enrutamiento por marca configurada (Pide facil)
+    if (origin.includes('pidefacil') || origin.includes('pide facil') || origin.includes('pide-facil') || origin.includes(process.env.PIDEFACIL_ORIGIN || 'pidefacil')) {
+        if (process.env.PIDEFACIL_WEBHOOK_URL) return process.env.PIDEFACIL_WEBHOOK_URL;
+    }
+
+    // 3. Detectar OmniRest por origen, variables o si el accountId es un UUID (fallback)
     const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(accountId);
     if (
         origin.includes('automata.bitend.ai') ||
         origin.includes('carlee-noncultivable-alta.ngrok-free.dev') ||
         origin.includes('localhost:4200') ||
         origin.includes('localhost:8080') ||
+        origin.includes('omnirest') ||
         isUuid
     ) {
         return process.env.OMNIREST_WEBHOOK_URL;
@@ -216,9 +229,13 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
                 console.log(`[${accountId}] 🕒 Enviando HISTORIAL al CRM: ${finalCleanNumber} (${text.substring(0, 20)}...)`)
             }
 
-            if (webhookUrl === process.env.OMNIREST_WEBHOOK_URL) {
+            const isRestaurantWebhook = Boolean(session.webhookUrl) ||
+                webhookUrl === process.env.OMNIREST_WEBHOOK_URL ||
+                (process.env.PIDEFACIL_WEBHOOK_URL && webhookUrl === process.env.PIDEFACIL_WEBHOOK_URL);
+
+            if (isRestaurantWebhook) {
                 if (fromMe) {
-                    console.log(`[${accountId}] 🚫 Ignorando mensaje saliente para OmniRest webhook (fromMe es true)`)
+                    console.log(`[${accountId}] 🚫 Ignorando mensaje saliente para webhook de restaurante/n8n (fromMe es true)`)
                     return
                 }
 
@@ -408,7 +425,7 @@ async function notifyNameUpdate(accountId, phoneNumber, userName) {
         }).catch(() => { }) // Silencioso
     } catch (e) { }
 }
-export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM', origin = null, activeGroupId = null, activeGroupName = null, phoneNumber = null) {
+export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM', origin = null, activeGroupId = null, activeGroupName = null, phoneNumber = null, webhookUrl = null) {
     let pairingCodeRequested = false
     // Inicializar sesión si no existe
     if (!sessions[accountId]) {
@@ -423,6 +440,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
             contactNamesByJid: {}, // Caché: JID -> nombre del contacto
             contactLids: {},
             origin: origin,
+            webhookUrl: webhookUrl,
             activeGroupId: activeGroupId,
             activeGroupName: activeGroupName
         }
@@ -432,6 +450,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
     if (companyId) sessions[accountId].companyId = companyId
     if (browserName) sessions[accountId].browserName = browserName
     if (origin) sessions[accountId].origin = origin
+    if (webhookUrl) sessions[accountId].webhookUrl = webhookUrl
     if (activeGroupId) sessions[accountId].activeGroupId = activeGroupId
     if (activeGroupName) sessions[accountId].activeGroupName = activeGroupName
 

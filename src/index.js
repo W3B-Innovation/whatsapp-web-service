@@ -1,4 +1,11 @@
-import 'dotenv/config'
+import dotenv from 'dotenv'
+import fs from 'fs'
+
+// Priorizar .env.local sobre .env si existe para desarrollo local
+if (fs.existsSync('.env.local')) {
+    dotenv.config({ path: '.env.local' })
+}
+dotenv.config()
 import express from 'express'
 import cors from 'cors'
 import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions, getGroups, getGroupInvite, resolveGroupInfo, updateSessionConfig } from './whatsappService.js'
@@ -34,7 +41,7 @@ app.use(cors({
 
 // Middleware para identificar y loguear el origen de cada petición en consola
 app.use((req, res, next) => {
-    const origin = req.headers.origin || req.headers.referer || 'Direct Access/Other';
+    const origin = req.body.origin || req.headers.origin || req.headers.referer || 'Direct Access/Other';
     console.log(`[API Request] ${new Date().toLocaleTimeString()} | ${req.method} ${req.path} | Origin: ${origin}`);
     next();
 });
@@ -180,7 +187,7 @@ app.get('/resolve-group', async (req, res) => {
 
 // Iniciar conexión manualmente para una cuenta específica
 app.post('/connect', async (req, res) => {
-    let { accountId = 'account-1', companyId, browserName, phoneNumber } = req.body
+    let { accountId = 'account-1', companyId, browserName, phoneNumber, webhookUrl } = req.body
     const origin = req.headers.origin || req.headers.referer || 'Direct Access/Other';
 
     // Adaptar el nombre del navegador (lo que aparece en el celular) según el origen
@@ -204,7 +211,7 @@ app.post('/connect', async (req, res) => {
         return res.json({ message: `La conexión para ${accountId} ya está en proceso`, status })
     }
 
-    connectToWhatsApp(accountId, companyId, browserName, origin, null, null, phoneNumber).catch(err => {
+    connectToWhatsApp(accountId, companyId, browserName, origin, null, null, phoneNumber, webhookUrl).catch(err => {
         console.error(`Error al conectar ${accountId}:`, err)
         setStatus(accountId, 'disconnected')
     })
