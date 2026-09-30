@@ -41,8 +41,50 @@ app.use(cors({
 
 // Middleware para identificar y loguear el origen de cada petición en consola
 app.use((req, res, next) => {
-    const origin = req.body.origin || req.headers.origin || req.headers.referer || 'Direct Access/Other';
+    const origin = req.body?.origin || req.headers?.origin || req.headers?.referer || 'Direct Access/Other';
     console.log(`[API Request] ${new Date().toLocaleTimeString()} | ${req.method} ${req.path} | Origin: ${origin}`);
+    next();
+});
+
+// Helper para parsear llaves por sistema (ej. API_KEYS=crm:token1,soyandrade:token2)
+function getRegisteredApiKeys() {
+    const map = new Map();
+    if (process.env.API_KEYS) {
+        process.env.API_KEYS.split(',').forEach(pair => {
+            const parts = pair.split(':').map(s => s.trim());
+            if (parts.length === 2 && parts[0] && parts[1]) {
+                map.set(parts[1], parts[0]);
+            }
+        });
+    }
+    const crmToken = process.env.CRM_WEBHOOK_TOKEN || process.env.CRM_SYNC_TOKEN;
+    if (crmToken && !map.has(crmToken)) {
+        map.set(crmToken, 'crm');
+    }
+    return map;
+}
+
+// Middleware de auditoría de autenticación de entrada (Etapa 1: solo registro, no bloquea)
+app.use((req, res, next) => {
+    if (req.path.startsWith('/api-docs') || req.path === '/favicon.ico') {
+        return next();
+    }
+
+    const authHeader = req.headers?.authorization || '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+    const apiKey = req.headers?.['x-api-key'] || bearerToken;
+
+    const registeredKeys = getRegisteredApiKeys();
+    const system = apiKey ? registeredKeys.get(apiKey) : null;
+
+    if (system) {
+        req.authenticatedSystem = system;
+        console.log(`[Auth Audit] ✅ ${req.method} ${req.path} autenticado como sistema: '${system}'`);
+    } else {
+        const origin = req.body?.origin || req.headers?.origin || req.headers?.referer || 'Direct Access/Other';
+        console.warn(`[Auth Audit] ⚠️ ${req.method} ${req.path} SIN llave válida (Origen: ${origin}, Key recibida: ${apiKey ? 'SI (desconocida)' : 'NO'})`);
+    }
+
     next();
 });
 
