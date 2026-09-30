@@ -1,5 +1,6 @@
 import { sendMessage } from './whatsappService.js'
 import fetch from 'node-fetch'
+import { webhookHeaders } from './webhookAuth.js'
 
 const MIN_DELAY = 60000;   // 60 segundos mínimo
 const MAX_DELAY = 90000;  // 90 segundos máximo
@@ -38,7 +39,7 @@ async function updateBulkProgress(webhookUrl, payload) {
         console.log(`[Bulk] Reporting progress to ${webhookUrl}: ${payload.sentCount} sent`);
         const response = await fetch(webhookUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: webhookHeaders(webhookUrl),
             body: JSON.stringify({
                 type: 'bulk_progress',
                 ...payload
@@ -133,7 +134,7 @@ export async function processBulkSend(data) {
 
                 fetch(webhookUrl, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: webhookHeaders(webhookUrl),
                     body: JSON.stringify(messagePayload)
                 }).then(res => {
                     if (!res.ok) {

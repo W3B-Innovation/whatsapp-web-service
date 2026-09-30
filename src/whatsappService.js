@@ -2,6 +2,7 @@ import { DisconnectReason, makeWASocket, useMultiFileAuthState, downloadMediaMes
 import pino from 'pino'
 import fs from 'fs'
 import fetch from 'node-fetch'
+import { webhookHeaders } from './webhookAuth.js'
 
 
 export const sessions = {}
@@ -324,7 +325,7 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
 
             const response = await fetch(webhookUrl, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: webhookHeaders(webhookUrl),
                 body: JSON.stringify({
                     accountId,
                     companyId: session.companyId || null,
@@ -412,7 +413,7 @@ async function notifyNameUpdate(accountId, phoneNumber, userName) {
 
         fetch(webhookUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: webhookHeaders(webhookUrl),
             body: JSON.stringify({
                 type: 'name_update',
                 accountId,
@@ -777,7 +778,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
             try {
                 const response = await fetch(webhookUrl, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: webhookHeaders(webhookUrl),
                     body: JSON.stringify({
                         type: isJoin ? 'group_join' : 'group_leave',
                         action: action, // 'add', 'remove', 'leave'
@@ -867,7 +868,7 @@ export async function handleMessageUpdates(accountId, updates) {
         try {
             await fetch(webhookUrl, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: webhookHeaders(webhookUrl),
                 body: JSON.stringify({
                     type: 'status_update',
                     accountId,
