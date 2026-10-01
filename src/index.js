@@ -6,6 +6,7 @@ if (fs.existsSync('.env.local')) {
     dotenv.config({ path: '.env.local' })
 }
 dotenv.config()
+import crypto from 'crypto'
 import express from 'express'
 import cors from 'cors'
 import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions, getGroups, getGroupInvite, resolveGroupInfo, updateSessionConfig } from './whatsappService.js'
@@ -64,9 +65,28 @@ function getRegisteredApiKeys() {
     return map;
 }
 
-// Middleware de auditoría de autenticación de entrada (Etapa 1: solo registro, no bloquea)
+// Comparación en tiempo constante para no filtrar la llave por tiempos de respuesta
+function findSystemByKey(apiKey, registeredKeys) {
+    if (!apiKey) return null;
+    const received = Buffer.from(String(apiKey));
+    let found = null;
+    for (const [key, system] of registeredKeys) {
+        const expected = Buffer.from(key);
+        if (expected.length === received.length && crypto.timingSafeEqual(expected, received)) {
+            found = system;
+        }
+    }
+    return found;
+}
+
+// Etapa 2: con REQUIRE_API_KEY=true se rechaza con 401 toda petición sin llave válida.
+// Sin esa variable sigue en Etapa 1 (solo registra quién llega sin llave y deja pasar).
+const REQUIRE_API_KEY = String(process.env.REQUIRE_API_KEY || '').toLowerCase() === 'true'
+
+// Middleware de autenticación de entrada (llave por sistema: header x-api-key o Authorization: Bearer)
 app.use((req, res, next) => {
-    if (req.path.startsWith('/api-docs') || req.path === '/favicon.ico') {
+    // La documentación, el favicon y los preflight de CORS no llevan llave
+    if (req.path.startsWith('/api-docs') || req.path === '/favicon.ico' || req.method === 'OPTIONS') {
         return next();
     }
 
@@ -75,7 +95,7 @@ app.use((req, res, next) => {
     const apiKey = req.headers?.['x-api-key'] || bearerToken;
 
     const registeredKeys = getRegisteredApiKeys();
-    const system = apiKey ? registeredKeys.get(apiKey) : null;
+    const system = findSystemByKey(apiKey, registeredKeys);
 
     if (system) {
         req.authenticatedSystem = system;
@@ -83,10 +103,19 @@ app.use((req, res, next) => {
     } else {
         const origin = req.body?.origin || req.headers?.origin || req.headers?.referer || 'Direct Access/Other';
         console.warn(`[Auth Audit] ⚠️ ${req.method} ${req.path} SIN llave válida (Origen: ${origin}, Key recibida: ${apiKey ? 'SI (desconocida)' : 'NO'})`);
+
+        if (REQUIRE_API_KEY) {
+            return res.status(401).json({ success: false, error: 'Unauthorized: llave de API requerida' });
+        }
     }
 
     next();
 });
+
+if (REQUIRE_API_KEY && getRegisteredApiKeys().size === 0) {
+    console.error('[Auth] REQUIRE_API_KEY=true pero no hay llaves registradas (API_KEYS / CRM_WEBHOOK_TOKEN): todas las peticiones serán rechazadas');
+}
+console.log(`[Auth] Autenticación de entrada: ${REQUIRE_API_KEY ? 'ESTRICTA (401 sin llave)' : 'solo auditoría (no bloquea)'}`);
 
 // Middleware para normalizar accountId (solo si es necesario)
 app.use((req, res, next) => {
