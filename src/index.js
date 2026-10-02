@@ -327,14 +327,30 @@ app.post('/send-message', async (req, res) => {
 
 // Nuevo endpoint para envíos masivos (procesamiento en fondo real)
 app.post('/bulk-send', async (req, res) => {
-    const { accountId, companyId, message, contacts, bulkMessageId, customTemplate, webhookUrl } = req.body
+    const { accountId, companyId, message, contacts, bulkMessageId, customTemplate, webhookUrl, dripConfig } = req.body
 
-    if (!accountId || !message || !contacts || !bulkMessageId) {
+    if (!accountId || !message || !Array.isArray(contacts) || contacts.length === 0 || !bulkMessageId) {
         return res.status(400).json({ error: 'Faltan parámetros requeridos para el envío masivo' })
     }
+    if (contacts.length > 2000) {
+        return res.status(400).json({ error: 'Demasiados destinatarios en una campaña (máximo 2000).' })
+    }
 
-    // Importación dinámica para evitar circular dependency si la hubiera
-    const { processBulkSend } = await import('./bulkService.js')
+    // La cuenta debe estar conectada AHORA: así el CRM lo sabe de inmediato y no queda "cargando"
+    if (getStatus(accountId) !== 'open') {
+        return res.status(503).json({ error: `La cuenta de WhatsApp (${accountId}) no está conectada. Vuelve a vincularla con el QR.` })
+    }
+
+    const { processBulkSend, activeCampaignForAccount } = await import('./bulkService.js')
+
+    // Una sola campaña a la vez por cuenta: dos en paralelo duplicarían el ritmo y delatarían el envío automático
+    if (activeCampaigns.has(bulkMessageId)) {
+        return res.status(409).json({ error: 'Esta campaña ya está en marcha.' })
+    }
+    const busyWith = activeCampaignForAccount(accountId)
+    if (busyWith) {
+        return res.status(409).json({ error: 'Esta cuenta ya está enviando otra campaña. Espera a que termine o pausa/cancela la anterior.' })
+    }
 
     // Lanzar en fondo y responder inmediatamente
     processBulkSend({
@@ -344,9 +360,11 @@ app.post('/bulk-send', async (req, res) => {
         contacts,
         bulkMessageId,
         customTemplate,
-        webhookUrl
+        webhookUrl,
+        dripConfig
     }).catch(err => {
         console.error(`[Bulk Error] Fatal en proceso de fondo para ${bulkMessageId}:`, err.message)
+        activeCampaigns.delete(bulkMessageId)
     })
 
     res.json({

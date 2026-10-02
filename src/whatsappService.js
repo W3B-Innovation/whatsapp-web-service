@@ -1011,7 +1011,13 @@ export function getNumber(accountId = 'default') {
     return sessions[accountId]?.number || null
 }
 
-export async function sendMessage(accountId = 'default', number, message, media = null) {
+/**
+ * Envía un mensaje. `options` (para envíos masivos por QR):
+ *   typing           simula "escribiendo…" antes de enviar, en proporción al largo del texto
+ *   requireOnWhatsApp  si el número no tiene WhatsApp, lanza un error NOT_ON_WHATSAPP en vez de enviar igual
+ *                    (escribir a números inexistentes es una de las señales que más delatan el envío automático)
+ */
+export async function sendMessage(accountId = 'default', number, message, media = null, options = {}) {
     const session = sessions[accountId]
     if (!session || !session.sock || session.connectionStatus !== 'open') {
         throw new Error(`WhatsApp no está conectado para la cuenta ${accountId}`)
@@ -1036,9 +1042,27 @@ export async function sendMessage(accountId = 'default', number, message, media 
                 jid = result.jid
             } else {
                 console.warn(`[${accountId}] onWhatsApp: número ${number} no encontrado en WhatsApp. JID original: ${jid}`)
+                if (options.requireOnWhatsApp && result && result.exists === false) {
+                    const err = new Error('El número no tiene WhatsApp')
+                    err.code = 'NOT_ON_WHATSAPP'
+                    throw err
+                }
             }
         } catch (err) {
             console.warn(`[${accountId}] onWhatsApp falló para ${number}, usando JID original. Error: ${err.message}`)
+        }
+    }
+
+    if (options.typing) {
+        // "Escribiendo…" unos segundos, como una persona; si falla la presencia no se impide el envío
+        try {
+            const typingMs = Math.min(9000, Math.max(1500, String(message || '').length * 45 + 600 + Math.floor(Math.random() * 1200)))
+            await session.sock.presenceSubscribe(jid)
+            await session.sock.sendPresenceUpdate('composing', jid)
+            await new Promise((resolve) => setTimeout(resolve, typingMs))
+            await session.sock.sendPresenceUpdate('paused', jid)
+        } catch (presenceError) {
+            console.warn(`[${accountId}] No se pudo simular "escribiendo": ${presenceError.message}`)
         }
     }
 

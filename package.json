@@ -6,6 +6,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "test": "node --test test/drip-policy.test.js test/bulk-loop.test.js",
     "dev": "nodemon --watch src --ignore auth_baileys --ignore node_modules --ext js --delay 2000 src/index.js"
   },
   "keywords": [
