@@ -9,7 +9,7 @@ dotenv.config()
 import crypto from 'crypto'
 import express from 'express'
 import cors from 'cors'
-import { connectToWhatsApp, getStatus, sendMessage, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions, getGroups, getGroupInvite, resolveGroupInfo, updateSessionConfig } from './whatsappService.js'
+import { connectToWhatsApp, getStatus, sendMessage, checkNumbersOnWhatsApp, setStatus, getLastQr, initExistingSessions, getNumber, getGlobalStats, logout, getSocket, sessions, getGroups, getGroupInvite, resolveGroupInfo, updateSessionConfig } from './whatsappService.js'
 import { fetchAndSyncHistory } from './recovery.js'
 import { activeCampaigns } from './bulkService.js'
 import { setupSwagger } from './swagger.js'
@@ -303,6 +303,25 @@ app.post('/logout', async (req, res) => {
 })
 
 // Enviar un mensaje usando una cuenta específica
+
+// Verificar si un número o lista de números tienen WhatsApp activo (sin enviar mensaje)
+app.post(['/check-number', '/on-whatsapp'], async (req, res) => {
+    const { accountId = 'default', number, numbers } = req.body;
+    const targetNumbers = numbers || (number ? [number] : []);
+
+    if (!targetNumbers.length) {
+        return res.status(400).json({ error: 'Falta parámetro: number o numbers' });
+    }
+
+    try {
+        const results = await checkNumbersOnWhatsApp(accountId, targetNumbers);
+        res.json({ success: true, count: results.length, results });
+    } catch (error) {
+        console.error(`[${accountId}] Error verificando números en WhatsApp:`, error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.post('/send-message', async (req, res) => {
     const { accountId = 'account-1', number, message, media } = req.body
 

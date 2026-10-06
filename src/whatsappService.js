@@ -1342,3 +1342,45 @@ export async function initExistingSessions() {
 }
 
 
+
+
+/**
+ * Verifica si uno o más números telefónicos están registrados en WhatsApp
+ * usando la conexión en vivo de Baileys (onWhatsApp). No envía mensajes.
+ */
+export async function checkNumbersOnWhatsApp(accountId = 'default', numbers = []) {
+    const session = sessions[accountId];
+    if (!session || !session.sock || session.connectionStatus !== 'open') {
+        throw new Error(`WhatsApp no está conectado para la cuenta ${accountId}`);
+    }
+
+    const list = Array.isArray(numbers) ? numbers : [numbers];
+    const results = [];
+
+    for (const num of list) {
+        if (!num) continue;
+        const clean = String(num).replace(/\D/g, '');
+        if (!clean) continue;
+        const jid = clean.includes('@') ? clean : `${clean}@s.whatsapp.net`;
+
+        try {
+            const onWa = await session.sock.onWhatsApp(jid);
+            const first = Array.isArray(onWa) ? onWa[0] : null;
+            const exists = Boolean(first?.exists);
+            results.push({
+                number: clean,
+                jid: first?.jid || jid,
+                exists,
+            });
+        } catch (err) {
+            results.push({
+                number: clean,
+                jid,
+                exists: false,
+                error: err.message,
+            });
+        }
+    }
+
+    return results;
+}
