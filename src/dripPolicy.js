@@ -36,12 +36,13 @@ export function nextBatchSize(drip) {
 }
 
 /** Configuración de la franja sin envíos. "off" la desactiva. Formato "22-8" (hora de inicio y de fin). */
-export function quietHoursConfig(env = process.env) {
+export function quietHoursConfig(env = process.env, overrideTimeZone = null) {
     const raw = (env.BULK_QUIET_HOURS || '22-8').trim().toLowerCase()
     if (raw === 'off' || raw === 'false' || raw === '0') return null
+    const tz = overrideTimeZone || env.BULK_TIMEZONE || 'America/Mexico_City'
     const m = raw.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/)
-    if (!m) return { start: 22, end: 8, timeZone: env.BULK_TIMEZONE || 'America/Mexico_City' }
-    return { start: Number(m[1]) % 24, end: Number(m[2]) % 24, timeZone: env.BULK_TIMEZONE || 'America/Mexico_City' }
+    if (!m) return { start: 22, end: 8, timeZone: tz }
+    return { start: Number(m[1]) % 24, end: Number(m[2]) % 24, timeZone: tz }
 }
 
 /** ¿Es hora de no enviar? (la franja puede cruzar la medianoche). */

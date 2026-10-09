@@ -54,7 +54,9 @@ function savePersistentSessions() {
                 activeGroupName: sessions[id].activeGroupName
             }
         }
-        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(metadata, null, 2))
+        fs.promises.writeFile(SESSIONS_FILE, JSON.stringify(metadata, null, 2), 'utf8').catch((err) => {
+            console.error('[System] Error guardando sesiones persistentes asíncronas:', err?.message || err);
+        })
     } catch (e) {
         console.error('[System] Error guardando sesiones persistentes:', e.message)
     }

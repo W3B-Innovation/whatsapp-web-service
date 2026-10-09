@@ -75,7 +75,7 @@ export async function processBulkSend(data, deps = {}) {
     const onReport = deps.onReport ?? (() => {})
     const { accountId, companyId, message, contacts, bulkMessageId, customTemplate, webhookUrl } = data
     const drip = normalizeDrip(data.dripConfig)
-    const quiet = quietHoursConfig()
+    const quiet = quietHoursConfig(process.env, data.timeZone || data.timezone || data.dripConfig?.timezone)
 
     console.log(`[Bulk] 🚀 Campaña ${bulkMessageId}: ${contacts.length} contactos, cuenta ${accountId}, ${Math.round(drip.minDelay / 1000)}-${Math.round(drip.maxDelay / 1000)} s entre mensajes`)
 

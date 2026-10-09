@@ -86,7 +86,7 @@ const REQUIRE_API_KEY = String(process.env.REQUIRE_API_KEY || '').toLowerCase() 
 // Middleware de autenticación de entrada (llave por sistema: header x-api-key o Authorization: Bearer)
 app.use((req, res, next) => {
     // La documentación, el favicon y los preflight de CORS no llevan llave
-    if (req.path.startsWith('/api-docs') || req.path === '/favicon.ico' || req.method === 'OPTIONS') {
+    if (req.path.startsWith('/api-docs') || req.path === '/favicon.ico' || req.path === '/health' || req.method === 'OPTIONS') {
         return next();
     }
 
@@ -178,6 +178,20 @@ app.get('/stats', (req, res) => {
             external: toMB(memory.external)    // Memoria usada por buffers de C++ (Baileys usa esto)
         },
         uptime_seconds: Math.floor(process.uptime())
+    })
+})
+
+// Endpoint estándar de salud para monitoreo de contenedores y servicios
+app.get('/health', (req, res) => {
+    const sessionIds = Object.keys(sessions)
+    const connectedSessions = sessionIds.filter(id => getStatus(id) === 'CONNECTED')
+    res.json({
+        status: 'ok',
+        uptime: Math.floor(process.uptime()),
+        timestamp: new Date().toISOString(),
+        totalSessions: sessionIds.length,
+        connectedSessions: connectedSessions.length,
+        version: '2.0.0'
     })
 })
 
