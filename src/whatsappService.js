@@ -102,6 +102,11 @@ function getWebhookUrl(accountId) {
         return process.env.OMNIREST_WEBHOOK_URL;
     }
 
+    // 4. Smart W3b Innovation
+    if (origin.includes('smart.w3binnovation.com') || origin.includes('w3binnovation.com')) {
+        return process.env.SMART_W3B_WEBHOOK_URL || 'https://smart.w3binnovation.com/api/whatsapp/web-sync/webhook';
+    }
+
     // 1. Prioridad: Subdominio específico de Códigos
     if (origin.includes('codigos.soyandrade.com')) {
         return process.env.CODIGOS_WEBHOOK_URL || 'https://codigos.soyandrade.com/api/whatsapp/web-sync/webhook';

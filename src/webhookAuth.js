@@ -1,12 +1,17 @@
 // Orígenes del CRM a los que se envía el token. Se calcula en cada llamada (no al importar):
 // en ES modules este archivo se evalúa antes del dotenv.config() de index.js.
 function getCrmOrigins() {
-    const origins = (process.env.CRM_WEBHOOK_ORIGINS || 'https://crm.bitend.ai')
+    const origins = (process.env.CRM_WEBHOOK_ORIGINS || 'https://crm.bitend.ai,https://smart.w3binnovation.com')
         .split(',').map(o => o.trim()).filter(Boolean);
 
     if (process.env.CRM_WEBHOOK_URL) {
         try {
             origins.push(new URL(process.env.CRM_WEBHOOK_URL).origin);
+        } catch {}
+    }
+    if (process.env.SMART_W3B_WEBHOOK_URL) {
+        try {
+            origins.push(new URL(process.env.SMART_W3B_WEBHOOK_URL).origin);
         } catch {}
     }
     return origins;

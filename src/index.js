@@ -22,7 +22,7 @@ app.use(express.json())
 // --- Configuración de Seguridad y Orígenes ---
 const allowedOrigins = process.env.ALLOWED_ORIGINS
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-    : ['https://crm.bitend.ai', 'https://codigos.soyandrade.com', 'https://soyandrade.com'];
+    : ['https://crm.bitend.ai', 'https://smart.w3binnovation.com', 'https://codigos.soyandrade.com', 'https://soyandrade.com'];
 
 app.use(cors({
     origin: (origin, callback) => {
@@ -273,7 +273,7 @@ app.get('/resolve-group', async (req, res) => {
 // Iniciar conexión manualmente para una cuenta específica
 app.post('/connect', async (req, res) => {
     let { accountId = 'account-1', companyId, browserName, phoneNumber, webhookUrl } = req.body
-    const origin = req.headers.origin || req.headers.referer || 'Direct Access/Other';
+    const origin = req.body?.origin || req.headers.origin || req.headers.referer || 'Direct Access/Other';
 
     // Adaptar el nombre del navegador (lo que aparece en el celular) según el origen
     if (!browserName) {
@@ -281,6 +281,8 @@ app.post('/connect', async (req, res) => {
             browserName = 'Bitend AI CRM';
         } else if (origin.includes('soyandrade.com')) {
             browserName = 'Soy Andrade CRM';
+        } else if (origin.includes('w3binnovation.com') || origin.includes('smart.w3b')) {
+            browserName = 'CRM W3b';
         } else {
             browserName = 'WhatsApp Sync Service';
         }
