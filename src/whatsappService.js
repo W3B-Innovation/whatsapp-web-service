@@ -237,9 +237,12 @@ async function sendToWebhook(accountId, msg, isHistory = false) {
                 console.log(`[${accountId}] 🕒 Enviando HISTORIAL al CRM: ${finalCleanNumber} (${text.substring(0, 20)}...)`)
             }
 
-            const isRestaurantWebhook = Boolean(session.webhookUrl) ||
+            const isCrmWebhook = typeof webhookUrl === 'string' && webhookUrl.includes('/api/whatsapp/web-sync/');
+            const isRestaurantWebhook = !isCrmWebhook && (
+                (Boolean(session.webhookUrl) && !session.webhookUrl.includes('/api/whatsapp/web-sync/')) ||
                 webhookUrl === process.env.OMNIREST_WEBHOOK_URL ||
-                (process.env.PIDEFACIL_WEBHOOK_URL && webhookUrl === process.env.PIDEFACIL_WEBHOOK_URL);
+                (process.env.PIDEFACIL_WEBHOOK_URL && webhookUrl === process.env.PIDEFACIL_WEBHOOK_URL)
+            );
 
             if (isRestaurantWebhook) {
                 if (fromMe) {
@@ -1316,6 +1319,7 @@ export function updateSessionConfig(accountId, config) {
 
     if (config.companyId !== undefined) sessions[accountId].companyId = config.companyId
     if (config.origin !== undefined) sessions[accountId].origin = config.origin
+    if (config.webhookUrl !== undefined) sessions[accountId].webhookUrl = config.webhookUrl
     if (config.activeGroupId !== undefined) sessions[accountId].activeGroupId = config.activeGroupId
     if (config.activeGroupName !== undefined) sessions[accountId].activeGroupName = config.activeGroupName
 

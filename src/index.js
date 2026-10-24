@@ -215,10 +215,10 @@ app.get('/status', (req, res) => {
 
 // Actualizar configuración de una sesión
 app.post('/update-config', (req, res) => {
-    const { accountId, companyId, origin, activeGroupId, activeGroupName } = req.body
+    const { accountId, companyId, origin, webhookUrl, activeGroupId, activeGroupName } = req.body
     if (!accountId) return res.status(400).json({ error: 'accountId es requerido' })
 
-    const success = updateSessionConfig(accountId, { companyId, origin, activeGroupId, activeGroupName })
+    const success = updateSessionConfig(accountId, { companyId, origin, webhookUrl, activeGroupId, activeGroupName })
     if (success) {
         res.json({ success: true, message: `Configuración de ${accountId} actualizada.` })
     } else {

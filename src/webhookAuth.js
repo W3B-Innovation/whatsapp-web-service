@@ -17,17 +17,17 @@ function getCrmOrigins() {
     return origins;
 }
 
-// Headers para llamadas a webhooks. El token solo se agrega si el destino es el CRM,
-// para no filtrarlo a los otros sistemas que usan este microservicio.
 export function webhookHeaders(url) {
     const headers = { 'Content-Type': 'application/json' };
     const token = process.env.CRM_WEBHOOK_TOKEN || process.env.CRM_SYNC_TOKEN;
     if (!token || !url) return headers;
     try {
-        const origin = new URL(url).origin;
-        if (getCrmOrigins().includes(origin)) {
+        const urlObj = new URL(url);
+        const origin = urlObj.origin;
+        if (getCrmOrigins().includes(origin) || urlObj.pathname.includes('/api/whatsapp/web-sync/')) {
             headers.Authorization = `Bearer ${token}`;
         }
     } catch {}
     return headers;
 }
+
