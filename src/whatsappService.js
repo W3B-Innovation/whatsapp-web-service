@@ -1,4 +1,5 @@
 import { DisconnectReason, makeWASocket, useMultiFileAuthState, downloadMediaMessage, fetchLatestWaWebVersion, isPnUser, Browsers } from '@whiskeysockets/baileys'
+import { esperaDeReconexion, ESTABLE_MS } from './reconexion.js'
 import pino from 'pino'
 import fs from 'fs'
 import fetch from 'node-fetch'
@@ -436,6 +437,48 @@ async function notifyNameUpdate(accountId, phoneNumber, userName) {
         }).catch(() => { }) // Silencioso
     } catch (e) { }
 }
+/** Reconecta con lo guardado en la sesión, sin pisar su nombre ni su origen. */
+function reconectar(accountId) {
+    const s = sessions[accountId]
+    if (!s) return Promise.resolve()
+    return connectToWhatsApp(accountId, s.companyId, s.browserName, s.origin, s.activeGroupId, s.activeGroupName, null, s.webhookUrl)
+}
+
+/**
+ * Agenda el siguiente intento, con espera creciente. Devuelve false si con ese
+ * código no se reintenta. Un intento que falla agenda el siguiente: la sesión
+ * no se queda parada esperando a que alguien la reconecte a mano.
+ */
+function programarReconexion(accountId, statusCode) {
+    const s = sessions[accountId]
+    if (!s) return false
+
+    if (s.conectadaDesde && Date.now() - s.conectadaDesde >= ESTABLE_MS) s.reconexionIntentos = 0
+    s.conectadaDesde = null
+
+    const intento = s.reconexionIntentos || 0
+    const espera = esperaDeReconexion(statusCode, intento)
+    if (espera === null) return false
+
+    s.reconexionIntentos = intento + 1
+    clearTimeout(s.reconexionTimer)
+    console.log(`[${accountId}] Desconectado por código ${statusCode} → reconectando en ${espera / 1000}s (intento ${intento + 1})`)
+    s.reconexionTimer = setTimeout(() => {
+        reconectar(accountId).catch(err => {
+            console.error(`[${accountId}] Error al reconectar:`, err.message)
+            if (!sessions[accountId]) return
+            sessions[accountId].connectionStatus = 'disconnected'
+            programarReconexion(accountId, statusCode)
+        })
+    }, espera)
+    return true
+}
+
+/** La sesión sigue guardada: se reconecta sin escanear. */
+export function tieneSesionGuardada(accountId) {
+    return fs.existsSync(`auth_baileys_${accountId}/creds.json`)
+}
+
 export async function connectToWhatsApp(accountId = 'default', companyId = null, browserName = 'Bitend AI CRM', origin = null, activeGroupId = null, activeGroupName = null, phoneNumber = null, webhookUrl = null) {
     let pairingCodeRequested = false
     // Inicializar sesión si no existe
@@ -632,6 +675,9 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
             const statusCode = lastDisconnect?.error?.output?.statusCode
             console.log(`[${accountId}] Conexión cerrada. Código: ${statusCode}`)
 
+            // Se cerró sesión mientras se cerraba el socket: ya no hay nada que atender.
+            if (!sessions[accountId]) return
+
             // Si fue un logout intencional por duplicado, no reintentar
             if (sessions[accountId].connectionStatus === 'error_duplicate_number') {
                 console.log(`[${accountId}] 🛑 Logout por duplicado completado.`)
@@ -647,17 +693,12 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
                 // Reseteamos el status primero para que el guard del singleton no lo bloquee.
                 console.log(`[${accountId}] restartRequired → reconectando para obtener credenciales...`)
                 sessions[accountId].connectionStatus = 'disconnected'
-                connectToWhatsApp(accountId, sessions[accountId]?.companyId)
-
-            } else if (statusCode === DisconnectReason.connectionClosed || statusCode === DisconnectReason.connectionLost) {
-                // 428 (connectionClosed) / 408 (connectionLost / timedOut):
-                // Los servidores de WA cerraron el WebSocket temporalmente (keepalive, rolling restart, etc.)
-                // La sesión y las credenciales son válidas → reconectar automáticamente con backoff
-                console.log(`[${accountId}] connectionClosed/Lost (${statusCode}) → reconectando en 3s...`)
-                sessions[accountId].connectionStatus = 'disconnected'
-                setTimeout(() => {
-                    connectToWhatsApp(accountId, sessions[accountId]?.companyId)
-                }, 3000)
+                reconectar(accountId).catch(err => {
+                    console.error(`[${accountId}] Error al reconectar tras restartRequired:`, err.message)
+                    if (!sessions[accountId]) return
+                    sessions[accountId].connectionStatus = 'disconnected'
+                    programarReconexion(accountId, statusCode)
+                })
 
             } else if (statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.multideviceMismatch) {
                 // Logout formal o conflicto multi-device: limpiar creds y esperar acción manual
@@ -672,19 +713,13 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
                 if (fs.existsSync(authFolder)) fs.rmSync(authFolder, { recursive: true, force: true })
                 sessions[accountId].connectionStatus = 'disconnected'
 
-            } else if (statusCode === DisconnectReason.unavailableService) {
-                // 503 (unavailableService): servidor de WA temporalmente no disponible
-                // (sobrecarga, rolling restart, etc.) → reconectar con backoff mayor
-                console.log(`[${accountId}] unavailableService (503) → reconectando en 5s...`)
-                sessions[accountId].connectionStatus = 'disconnected'
-                setTimeout(() => {
-                    connectToWhatsApp(accountId, sessions[accountId]?.companyId)
-                }, 5000)
-
             } else {
-                // Cualquier otro error desconocido: desconectado, sin reintento automático
-                console.log(`[${accountId}] Desconectado por código ${statusCode}. Acción manual requerida.`)
+                // Las credenciales siguen guardadas: cortes normales (428, 408, 503) y lo que
+                // Baileys no clasifica (500, sin código) se recuperan solos. Ver reconexion.js.
                 sessions[accountId].connectionStatus = 'disconnected'
+                if (!programarReconexion(accountId, statusCode)) {
+                    console.log(`[${accountId}] Desconectado por código ${statusCode}. Acción manual requerida.`)
+                }
             }
 
         } else if (connection === 'open') {
@@ -714,6 +749,8 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
             }
 
             sessions[accountId].connectionStatus = 'open'
+            sessions[accountId].conectadaDesde = Date.now()
+            clearTimeout(sessions[accountId].reconexionTimer)
             sessions[accountId].lastQr = null
             sessions[accountId].lastPairingCode = null
             sessions[accountId].number = cleanNumber
@@ -1139,6 +1176,7 @@ export async function logout(accountId = 'default') {
     }
 
     // Limpiar estado local
+    clearTimeout(sessions[accountId]?.reconexionTimer)
     delete sessions[accountId]
 
     // Limpiar carpeta de auth si no está conectado (cancelación de vinculación)
@@ -1345,7 +1383,12 @@ export async function initExistingSessions() {
             } else {
                 console.log(`Restaurando sesión para: ${accountId}`)
             }
-            connectToWhatsApp(accountId, companyId).catch(err => console.error(`Error restaurando ${accountId}:`, err))
+            connectToWhatsApp(accountId, companyId).catch(err => {
+                console.error(`Error restaurando ${accountId}:`, err)
+                if (!sessions[accountId]) return
+                sessions[accountId].connectionStatus = 'disconnected'
+                programarReconexion(accountId)
+            })
         } else {
             console.log(`Saltando carpeta vacía o corrupta: ${folder}`)
         }
