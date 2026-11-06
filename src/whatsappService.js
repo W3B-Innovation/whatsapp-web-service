@@ -673,7 +673,7 @@ export async function connectToWhatsApp(accountId = 'default', companyId = null,
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode
-            console.log(`[${accountId}] Conexión cerrada. Código: ${statusCode}`)
+            console.log(`[${accountId}] Conexión cerrada. Código: ${statusCode}. Motivo: ${lastDisconnect?.error?.message || 'sin detalle'}`)
 
             // Se cerró sesión mientras se cerraba el socket: ya no hay nada que atender.
             if (!sessions[accountId]) return
